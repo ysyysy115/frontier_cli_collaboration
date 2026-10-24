@@ -1,5 +1,13 @@
 {
   "codexModel": "gpt-6-astra",
+  "codexRunModel": "gpt-6.1-sol",
+  "codexRunEffort": "medium",
   "agyModel": "gemini-4-argon",
-  "effort": "high"
+  "agyFallbackModel": "gemini-3.8-flash",
+  "effort": "high",
+  "argonReserve": 0.15,
+  "argonStop": 0.05,
+  "codexNetwork": true,
+  "timeoutMinutes": 45,
+  "python": ""
 }

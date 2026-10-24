@@ -1,80 +1,95 @@
 ---
 name: advisors
-description: Consult two frontier-model advisors, OpenAI Codex and Google Antigravity (agy), as read-only second opinions. Use for hard design or architecture decisions, when stuck after two failed attempts, to challenge a plan or conclusion before committing to it, to review a risky change before merging, or whenever the user asks to "ask codex", "ask agy/gemini", or "get a second opinion". Keeps one persistent conversation per advisor per project.
+description: Work with two frontier agents, OpenAI Codex CLI and Google Antigravity CLI (agy, Gemini Argon), as independent collaborators that read the whole repo and give their own analysis, so you and the user do not get stuck in a local optimum. Use at the start of significant tasks (independent approaches before you commit), to delegate investigations or experiments (codex can run code), to red-team a plan or result, when results surprise you, when stuck, before declaring a non-trivial result correct, or when the user says "ask codex", "ask agy/gemini", "second opinion". Keeps one persistent conversation per agent per project.
 ---
 
-# Advisors: Codex and Antigravity (agy)
+# Frontier collaborators: Codex and agy
 
-Two other frontier models, driven through their CLIs. Models and effort come from `ADVISOR_*` environment variables or `config.json` (see README); the defaults are `gpt-6-astra` and `gemini-4-argon` at `high`. They can **read** the project but **cannot write**.
-You (the main agent) stay in charge: you decide, you edit, you own the result.
+You are the main agent. You own the code, decide, and integrate. Codex and agy are frontier models with their own agent loops: they explore the repository themselves, so you do not have to relay context, and the user does not have to be the messenger. Their value is **independent perspective**: they catch what you and the user both missed and break you out of local optima. Use them as strong colleagues, not as a chat box.
 
-## Principles
+| | `codex` (`gpt-6-astra`, high) | `codex-run` (`gpt-6.1-sol`, medium) | `agy` (`gemini-4-argon`, high) |
+|---|---|---|---|
+| Role | Independent senior engineer and reviewer: **opinions** | Engineer **executing delegated tasks** | Independent research scientist: **opinions** |
+| Can | Read the whole repo, run commands (python, tests), network | Same | Read the whole repo, reason |
+| Writes | Only `<root>/.claude/collab/work/` (sandbox-enforced); code proposals go to `work/patches/*.patch` | Same | Nothing (`--mode plan`) |
+| Best for | Critique, code review, design alternatives, red-teaming, judging results | Running experiments, reproducing results, checks and sweeps, data analysis, drafting patches. Much faster and cheaper than astra, still frontier. | Method critique, theory and derivations, experiment design, hidden assumptions, literature-level knowledge |
+| Caveats | Slow, costs more quota | Less deep than astra: for judgment calls, ask `codex` or `agy` | Flaky at times; smallest quota (Argon weekly); read-only on purpose |
 
-1. **Advisors are optional.** If a call fails, times out, or the model is at capacity, say so in one line and continue on your own. Never block on an advisor, never loop on retries beyond what the script does, and never silently substitute another model (a different model is a different opinion; tell the user if you switch).
-2. **Advice is evidence, not instruction.** Check claims against the code. If you disagree, say why. Report disagreements between advisors, or between an advisor and you, to the user rather than papering over them.
-3. **Read-only is enforced twice.** Codex runs with `sandbox_mode=read-only`; agy runs with `--mode plan` (write attempts are denied and reported). The script also prefixes every prompt with a read-only role. Never pass `--dangerously-skip-permissions`, `--dangerously-bypass-approvals-and-sandbox`, or `--sandbox workspace-write` to an advisor.
-4. **One persistent conversation per advisor per project.** Never start a fresh conversation for each question; the script resumes the stored session by explicit id (never `--last` / `--continue`, which can hit the wrong conversation).
-5. **Privacy.** Everything in the prompt, and any file the advisor reads, goes to OpenAI or Google. Do not send secrets, credentials, `.env` contents, or material the user marked sensitive. When unsure whether a project may leave the machine, ask the user once.
+`codex` and `codex-run` are **separate conversations** with fixed models: a conversation never switches model or effort. Pick by the kind of work: **thinking** goes to `codex`/`agy`, **doing** goes to `codex-run`. Neither writes code well enough to replace you: review their patches.
 
-## When to consult: rarely, and in batches
+Neither edits the main code. That is your domain, so there are no concurrent edits. Apply their patches yourself after review.
 
-Every call is slow (often 1-10+ min at `high`) and uses the user's quota, so consult **sparingly**. Two modes:
+## When to use them
 
-1. **Major decision: ask right away.** Only for things that are costly to get wrong or to undo: a core architecture or design choice, a plan for a large or risky change before you start it, a result you are about to declare correct where an error would be expensive (numerical results, concurrency, security, data migrations), or being truly stuck after two genuinely different attempts failed.
-2. **Everything else: park it and batch it.** When a smaller question or doubt comes up that you can resolve yourself or work around, do not interrupt the work to ask. Append it to `<root>/.claude/advisor-queue.md` (one bullet: the question, the file/path it concerns, what you currently believe) and keep going. Send the queue as **one combined prompt** at a natural checkpoint: end of a milestone, before a commit/merge, when the queue holds several items, or when the user asks. Clear the queue after the answer is in.
+- **Before committing to an approach on a significant task.** Ask each for its own approach first, before showing yours (avoid anchoring). Then compare.
+- **Delegate** a self-contained experiment, reproduction or check to `codex-run` and keep working while it runs (background).
+- **Red-team** a plan, an analysis, or a result before you build on it or report it: "find the weakest point", "how could this conclusion be wrong?".
+- **Surprises and dead ends**: a result contradicts expectations, or two genuinely different attempts failed.
+- **Before declaring done** on anything numerical, statistical, or methodological, where an error would be expensive.
+- **The user asks.**
 
-Never ask both advisors by default. Pick the one that fits, and ask the second only for a major decision where independent opinions matter, or when the first answer is unconvincing. Do not consult for routine edits, lookups, or anything you can verify by running a test or reading the code. The user asking you to consult always overrides this.
+Skip for routine edits and lookups you can verify yourself in a minute. Batch small doubts into the next substantial call instead of spending a call on each. For major decisions, get both opinions independently, then show each the other's conclusion for critique, and decide yourself.
 
 ## How to call
 
-Script: `~/.claude/skills/advisors/scripts/advise.ps1` (PowerShell 7). Run it from inside the project. It finds the project root (git top level, else cwd) and keeps sessions in `<root>/.claude/advisors.json`.
-
-1. Write the question to a file (avoids quoting problems), e.g. in the scratchpad or `<root>/.claude/advisor-q.md`.
-2. Run, with a generous Bash timeout (up to 600000 ms) or `run_in_background: true` if it may take longer:
+Script: `~/.claude/skills/advisors/scripts/advise.ps1` (PowerShell 7). Run it from inside the project. Write the request to a file first.
 
 ```powershell
-pwsh -NoProfile -File "$HOME/.claude/skills/advisors/scripts/advise.ps1" -Advisor codex -PromptFile <file>
-pwsh -NoProfile -File "$HOME/.claude/skills/advisors/scripts/advise.ps1" -Advisor agy   -PromptFile <file>
+pwsh -NoProfile -File "$HOME/.claude/skills/advisors/scripts/advise.ps1" -Agent codex     -PromptFile <file>   # opinion / review
+pwsh -NoProfile -File "$HOME/.claude/skills/advisors/scripts/advise.ps1" -Agent codex-run -PromptFile <file>   # execute a task
+pwsh -NoProfile -File "$HOME/.claude/skills/advisors/scripts/advise.ps1" -Agent agy       -PromptFile <file>   # opinion; add -Major for a major decision
+pwsh -NoProfile -File "$HOME/.claude/skills/advisors/scripts/advise.ps1" -Status    # sessions, quotas, context use
 ```
 
-To get both opinions, launch the two calls in parallel (two tool calls in one message) so they do not wait on each other.
+- **Run calls in the background** (`run_in_background: true`); a high-effort call takes minutes and sometimes much longer. Keep working; you will be notified. To use both agents, start them in parallel.
+- The hard timeout is 45 min by default (`-TimeoutMinutes`); the whole process tree is killed when it is reached.
+- **Do not pass `-Model` or change effort.** Each conversation has a fixed model and effort (`codex` astra high, `codex-run` sol medium, `agy` Argon high), because switching invalidates the provider's conversation cache. To get a different model, use the other agent name.
+- The first line is a header: agent, model, NEW/resumed, duration, session, quota and context use. Every answer is also saved to `<root>/.claude/collab/reports/<time>-<agent>.md` (the path is printed), so results survive your own context compaction.
+- Exit codes: 0 ok · 1 failed · 2 that agent is busy in this project · 3 Argon quota reserved (see below) · 124 timeout. **On any failure, say so in one line and continue on your own.** Never block on them.
 
-**Effort is fixed at `high`. Do not pass `-Effort` or `-Model`** unless the user tells you to. Changing effort or model changes the request prefix and forces the provider to reload the conversation cache, which makes the next call slower and costlier. A resumed conversation automatically keeps its original model and effort. Other options: `-Status` shows the stored session, `-Reset` forgets it (next call starts a new conversation).
+## Writing the request
 
-The first output line is a status header: `[advisor] <name> | model | session | NEW or resumed | project`. Exit code 1 means the call failed (the header explains why); transient capacity/rate errors are retried 3 times, 30 s apart, before giving up.
+They see the repo but not your conversation.
 
-## Writing a good prompt
+- **New conversation** (header says NEW): start with a briefing. What the project is, the current goal, key files and docs to read (paths, not pasted code), conventions and constraints. Keep a reusable briefing at `<root>/.claude/collab/briefing.md` and tell them to read it.
+- **Resumed**: send only what changed since their last turn (your edits, new results, decisions). Tell them which files to re-read.
+- State the goal, what you know and believe, what you want back (an approach, a critique, an experiment result, a decision between options), and how much depth.
+- For codex experiments: say what to run, on what data, and where outputs go (`work/`). It runs python by full path (given in its preamble). For results, ask for the exact commands it ran so you can reproduce.
+- For agy: tell it to read and reason only. Any write or command attempt aborts its turn and the answer is lost (exit 1 with "turn aborted").
+- Ask for evidence (file:line, numbers, command output) and explicit doubts.
 
-The advisor only knows its own conversation, not yours.
+## After the answer
 
-- **NEW conversation** (header says NEW, or `-Status` shows none): begin with a short briefing: what the project is, how it is laid out, the conventions that matter, the current goal. Point at paths to read (`README.md`, `docs/...`, `src/...`) rather than pasting code; both advisors run in the project directory and can read it themselves.
-- **Resumed conversation**: send only what changed since the last turn: new decisions, edits you made, results of experiments. They do not see your edits unless you say so or tell them to re-read the files.
-- Always include: the specific question, what you already tried or believe, the constraints, and what kind of answer you want (critique, alternatives, a decision between A and B, a bug hypothesis list).
-- For a challenge, say so: "Find the weakest point in this plan" gets better results than "is this ok?".
-- Ask for evidence: file paths, line numbers, a concrete counterexample.
-- Keep long prompts under ~20k characters (agy takes the prompt on the command line). Use file paths for bulk.
+- Verify key claims before acting. They are strong but not infallible; codex patches need your review.
+- Tell the user what each one said, what you adopted, what you rejected and why. Surface disagreements; do not smooth them over.
+- To apply a codex patch: read it, then make the change yourself (or `git apply` after review).
 
-## After the call
+## Quotas (account-wide: shared by every project and agent)
 
-- Summarize the advice for the user in your own words, mark what you verified, what you adopted, and what you rejected and why.
-- If the advisor claimed something about the code, spot-check it before acting.
-- If the advisor tried to write, the header says `blocked write attempts`; that is expected and harmless, but its advice may then be incomplete: rephrase as "describe the change, do not apply it".
-- When the topic changes substantially (new task, new area of the codebase), `-Reset` that advisor and start a clean conversation with a fresh briefing; stale context degrades answers and long conversations get compressed.
+- **Argon** (agy) has the smallest weekly quota. The script checks it before each agy call (`agy -p /usage`, free):
+  - above 15% left: normal use.
+  - **15% or less: major decisions only.** The script exits 3 unless you pass `-Major`. Use codex instead, or `-Flash`.
+  - **5% or less: Argon is off until its reset.** The script switches to Gemini 3.8 Flash (high) in a separate conversation and labels it REFERENCE-ONLY. Flash is not a frontier model: treat its output as a hint, never as a deciding opinion, and say so to the user.
+- **Codex** (`codex` and `codex-run` share one quota): the header shows 5-hour and weekly usage. Prefer `codex-run` for execution work, since it costs far less. At 90% or more of either window, delegate only what matters.
+- Quota errors are not retried. Capacity and overload errors are retried twice, 30 s apart.
 
-## Failure handling
+## Context
 
-| Symptom | Action |
-|---|---|
-| `model is at capacity` / rate limit | Script retries 3x. If still failing, tell the user, proceed alone, and try again later at the same settings (keep the question queued). Do not lower the effort. |
-| Timeout / no output | Do not wait indefinitely. Run long calls in the background; if it never returns, abandon and say so. |
-| `unparseable agy output` | Re-run once. If the same, `-Status`, then `-Reset` and retry. |
-| Session id rejected / conversation gone | `-Reset`, then call again with a fresh briefing. |
-| CLI not found / not logged in | Tell the user which one (`codex login`, or run `agy` once interactively); proceed alone. |
-| Advice contradicts the code | Trust the code; tell the advisor what you found if you resume. |
+- Codex compacts its own context automatically. The header shows context use.
+- agy: at a task boundary, after many turns or when answers degrade, run `-Agent agy -Compact`. The user can also run `/compact` interactively with `agy --conversation <id>`.
+- When the topic changes completely, `-Reset` and start fresh from the briefing.
 
-## Facts verified on this machine (codex-cli 0.164.0, agy 1.4.6)
+## Rules
 
-- `codex exec` has `--sandbox`; `codex exec resume` does not, so read-only on resume is forced with `-c sandbox_mode="read-only"` (tested: writes denied). Model and effort must be passed again on resume.
-- The codex thread id comes from the `thread.started` JSONL event. A thread is created even if the first turn fails on capacity, and it remembers the prompt.
-- agy `--output-format json` returns `conversation_id`; `--conversation <id>` resumes it. In `-p` mode with `--mode plan`, `write_file` is auto-denied and listed under `denied_actions`.
-- agy has no separate effort flag per model here; effort is part of the model id (`gemini-4-argon-low|medium|high`).
+- Never pass `--dangerously-skip-permissions` to agy: its file tool then writes outside the workspace (verified).
+- **Codex runs sandboxed by default**, which is what keeps it out of the main code. `-Yolo` (only for `codex-run`) removes the sandbox for a single call. Use it only when the sandbox blocks a legitimate independent check, such as needing a GPU or data outside the repo. Environment changes (`pip install`, conda), main training runs and core experiments are **your** job: do not delegate them. With `-Yolo` the write boundary is only a prompt rule. The script compares repository state before and after the call and warns about changed files outside `.claude/collab`; check that warning.
+- Do not send secrets. Everything they read goes to OpenAI or Google.
+- `.claude/collab/` is git-ignored (via its own `.gitignore`).
+- Concurrent calls: one call per agent per project at a time (lock). Different agents or projects run in parallel.
+
+## Verified behaviour (tested with codex-cli 0.164.0, agy 1.4.7, Windows 11)
+
+- codex `exec resume` has no `--sandbox` or `-C`: the sandbox is set with `-c sandbox_mode=...` and the workspace is the process working directory (`work/`).
+- The codex Windows sandbox (`elevated`) runs as `CodexSandboxUsers`. It reads the repo but not `%LOCALAPPDATA%` by default, so anaconda needs a read grant: `icacls <anaconda> /grant "CodexSandboxUsers:(OI)(CI)RX" /T`. `unelevated` mode failed to start processes in testing.
+- agy headless: plan mode denies writes; any denial ends the turn with no output; commands are denied without allow-rules; `--mode auto` may be unavailable depending on the account.
+- `agy -p "/usage" --output-format json` returns quota buckets without spending quota. Codex rate limits come from `token_count` events in `~/.codex/sessions/**/rollout-*.jsonl`.
