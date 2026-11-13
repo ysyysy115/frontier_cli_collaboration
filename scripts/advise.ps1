@@ -1,40 +1,47 @@
 <#
 .SYNOPSIS
-  Delegate work to two frontier agents - Codex CLI and Antigravity CLI (agy) - from Claude Code,
+  Delegate work to frontier agents - Codex CLI and Antigravity CLI (agy) - from Claude Code,
   keeping one persistent conversation per agent per project.
 
 .DESCRIPTION
-  codex : independent research engineer. Reads the whole repo, runs commands (python, tests),
-          writes ONLY under <root>/.claude/collab/work (enforced by the workspace-write sandbox).
-  agy   : independent research scientist. Read-only (--mode plan): reads and reasons, no commands.
-          Uses Gemini Argon; falls back to Gemini Flash (reference-only) when Argon quota runs low.
+  codex     : independent senior engineer (gpt-6-astra). Reads the whole repo, runs commands,
+              writes ONLY under <root>/.claude/collab/work (enforced by the workspace-write sandbox).
+  codex-run : same sandbox, gpt-6.1-sol, for executing delegated tasks.
+  hydrogen  : agy CLI with Gemini 4 Hydrogen (xhigh). Read-only (--mode plan). Shared Gemini quota pool.
+  agy       : agy CLI with Gemini 4 Argon (high), the frontier Gemini. Read-only. Separate, small Argon quota.
+              Alias: argon.
 
   Every answer is saved under <root>/.claude/collab/reports/. Sessions: <root>/.claude/collab/sessions.json.
 
 .EXAMPLE
-  advise.ps1 -Agent codex -PromptFile task.md
-  advise.ps1 -Agent agy   -PromptFile question.md -Major
+  advise.ps1 -Agent codex    -PromptFile task.md
+  advise.ps1 -Agent hydrogen -PromptFile question.md
+  advise.ps1 -Agent agy      -PromptFile question.md -Major
   advise.ps1 -Status
-  advise.ps1 -Agent agy -Compact
+  advise.ps1 -Agent hydrogen -Compact
   advise.ps1 -Agent codex -Reset
 #>
 param(
-    [ValidateSet('codex', 'codex-run', 'agy')][string]$Agent,
+    [ValidateSet('codex', 'codex-run', 'hydrogen', 'agy', 'argon')][string]$Agent,
     [string]$PromptFile,
     [string]$Prompt,
-    [switch]$Major,          # agy: allowed to spend Argon reserve (major decision)
-    [switch]$Flash,          # agy: force the Flash fallback model
+    [switch]$Major,          # agy/hydrogen: allowed to spend the quota reserve (major decision)
     [switch]$Yolo,           # codex-run only: no sandbox, for checks the sandbox blocks (GPU, data outside the repo)
     [switch]$Status,
     [switch]$Reset,
     [switch]$Compact,
     [int]$TimeoutMinutes,
     [string]$Model,
-    [int]$Retries = 2
+    [int]$Retries = 2,
+    [ValidatePattern('^[a-z0-9][a-z0-9-]{0,39}$')][string]$Thread   # separate conversation for a distinct workstream
 )
 
 $ErrorActionPreference = 'Stop'
 $AgyExe = Join-Path $env:LOCALAPPDATA 'agy\bin\agy.exe'
+# Session-only settings (never saved). An explicit deny rule beats the user's global allow-list, and the
+# denial is returned to the model as a tool error. Without it, headless mode auto-denies any command that is
+# not allow-listed and ENDS THE TURN, losing the answer (Hydrogen reaches for the shell often).
+$AgyDenyCommands = '{"permissions":{"deny":["command(*)"]}}'
 
 # --- configuration: env var > config.json > default --------------------------
 $cfgFile = Join-Path $PSScriptRoot '..\config.json'
@@ -50,10 +57,14 @@ $CodexModel   = Get-Setting 'COLLAB_CODEX_MODEL' 'codexModel' 'gpt-6-astra'     
 $CodexRunModel  = Get-Setting 'COLLAB_CODEX_RUN_MODEL' 'codexRunModel' 'gpt-6.1-sol'  # codex-run: executing tasks
 $CodexRunEffort = Get-Setting 'COLLAB_CODEX_RUN_EFFORT' 'codexRunEffort' 'medium'
 $AgyModel     = Get-Setting 'COLLAB_AGY_MODEL' 'agyModel' 'gemini-4-argon'      # without effort suffix
-$AgyFallback  = Get-Setting 'COLLAB_AGY_FALLBACK' 'agyFallbackModel' 'gemini-3.8-flash'
+$HydrogenModel  = Get-Setting 'COLLAB_HYDROGEN_MODEL' 'hydrogenModel' 'gemini-4-hydrogen'
+$HydrogenEffort = Get-Setting 'COLLAB_HYDROGEN_EFFORT' 'hydrogenEffort' 'xhigh'
 $Effort       = Get-Setting 'COLLAB_EFFORT' 'effort' 'high'
 $ArgonReserve = [double](Get-Setting 'COLLAB_ARGON_RESERVE' 'argonReserve' 0.15)  # below: major decisions only
-$ArgonStop    = [double](Get-Setting 'COLLAB_ARGON_STOP' 'argonStop' 0.05)        # below: Argon off, Flash only
+$ArgonStop    = [double](Get-Setting 'COLLAB_ARGON_STOP' 'argonStop' 0.05)        # below: Argon off (use hydrogen)
+$GeminiReserve = [double](Get-Setting 'COLLAB_GEMINI_RESERVE' 'geminiReserve' 0.10) # shared Gemini pool: below, major only
+# highest effort tier each agy model offers (agy models): Argon low..high, Hydrogen low..xhigh
+function Limit-Effort($e, $max) { $order = 'low', 'medium', 'high', 'xhigh'; $i = [array]::IndexOf($order, ($e -replace 'max', 'xhigh')); if ($i -lt 0) { $i = 2 }; $order[[math]::Min($i, [array]::IndexOf($order, $max))] }
 $CodexNetwork = "$(Get-Setting 'COLLAB_CODEX_NETWORK' 'codexNetwork' 'true')" -eq 'true'
 $PythonExe    = Get-Setting 'COLLAB_PYTHON' 'python' ((Get-Command python -ErrorAction SilentlyContinue).Source)
 if (-not $TimeoutMinutes) { $TimeoutMinutes = [int](Get-Setting 'COLLAB_TIMEOUT_MINUTES' 'timeoutMinutes' 45) }
@@ -122,34 +133,51 @@ function Format-Pct($f) { if ($null -eq $f) { '?' } else { "$([math]::Round(100 
 $reg = Read-Registry
 if ($Status) {
     "project: $root"
-    foreach ($k in 'codex', 'codex-run', 'agy', 'agy-flash') {
+    $base = 'codex', 'codex-run', 'hydrogen', 'agy'
+    $threads = @($reg.Keys | Where-Object { $_ -like '*@*' -and ($_ -split '@')[0] -in $base } | Sort-Object)
+    foreach ($k in @($base) + $threads) {
         $e = $reg[$k]
-        if ($e) { "  $k session $($e.id)  model=$($e.model)  turns=$($e.turns)  last=$($e.last)" } else { "  ${k}: no session" }
+        $busy = ''
+        $lf = Join-Path $collab "$k.lock"
+        if (Test-Path $lf) { $lp = [int](Get-Content $lf -Raw -ErrorAction SilentlyContinue); if ($lp -and (Get-Process -Id $lp -ErrorAction SilentlyContinue)) { $busy = '  BUSY' } }
+        if ($e) { "  $k$busy  session $($e.id)  model=$($e.model)  turns=$($e.turns)  last=$($e.last)$(if ($e.lastAsk) { "`n      last ask: $($e.lastAsk)" })" } else { "  ${k}: no session$busy" }
     }
     $aq = Get-AgyQuota
-    if ($aq) { "agy quota: Argon weekly left $(Format-Pct $aq.argon.left) (reset $($aq.argon.reset)); Gemini weekly left $(Format-Pct $aq.gemini.left), 5h left $(Format-Pct $aq.gemini5h.left)" } else { 'agy quota: unavailable' }
+    if ($aq) { "agy quota: Argon weekly left $(Format-Pct $aq.argon.left) (reset $($aq.argon.reset)); shared Gemini pool (Hydrogen, Flash) weekly left $(Format-Pct $aq.gemini.left), 5h left $(Format-Pct $aq.gemini5h.left) (reset $($aq.gemini5h.reset))" } else { 'agy quota: unavailable' }
     $cq = Get-CodexRollout $reg['codex'].id
     if ($cq) { "codex quota: 5h used $($cq.h5)%, weekly used $($cq.week)% (reset $($cq.weekReset)); context used $($cq.ctx)%  [as of the last codex call]" } else { 'codex quota: unknown (no recent session)' }
     return
 }
-if (-not $Agent) { throw 'Specify -Agent codex|agy (or -Status)' }
+if (-not $Agent) { throw 'Specify -Agent codex|codex-run|hydrogen|agy (or -Status)' }
+if ($Agent -eq 'argon') { $Agent = 'agy' }   # alias; the session key stays 'agy'
+$isGemini = $Agent -in 'agy', 'hydrogen'
 
 # --- choose model / session key ------------------------------------------------
-$key = $Agent
+$key = if ($Thread) { "$Agent@$Thread" } else { $Agent }   # one conversation (and lock) per key
 $note = $null
+$admin = $Reset -or $Compact   # bookkeeping calls are never blocked by quota
 if ($Agent -eq 'agy') {
     $aq = Get-AgyQuota
-    $useFlash = [bool]$Flash
-    if (-not $useFlash -and $aq -and $aq.argon) {
-        if ($aq.argon.left -le $ArgonStop) { $useFlash = $true; $note = "Argon quota exhausted ($(Format-Pct $aq.argon.left) left, resets $($aq.argon.reset)) -> Flash, REFERENCE-ONLY" }
-        elseif ($aq.argon.left -le $ArgonReserve -and -not $Major -and -not $Reset -and -not $Compact) {
-            Write-Host "[collab] agy | Argon weekly quota low ($(Format-Pct $aq.argon.left) left, resets $($aq.argon.reset)). Reserved for major decisions: re-run with -Major, or use -Flash (reference-only)."
+    if ($aq -and $aq.argon -and -not $admin) {
+        if ($aq.argon.left -le $ArgonStop) {
+            Write-Host "[collab] agy | Argon weekly quota exhausted ($(Format-Pct $aq.argon.left) left, resets $($aq.argon.reset)). Argon is off until then: use -Agent hydrogen (or codex)."
+            exit 3
+        }
+        if ($aq.argon.left -le $ArgonReserve -and -not $Major) {
+            Write-Host "[collab] agy | Argon weekly quota low ($(Format-Pct $aq.argon.left) left, resets $($aq.argon.reset)). Reserved for major decisions: re-run with -Major, or use -Agent hydrogen."
             exit 3
         }
     }
-    if ($useFlash) { $key = 'agy-flash'; if (-not $note) { $note = 'Flash model: REFERENCE-ONLY, not a frontier opinion' } }
-    $base = if ($useFlash) { $AgyFallback } else { $AgyModel }
-    if (-not $Model) { $Model = "$base-$($Effort -replace 'xhigh|max','high')" }
+    if (-not $Model) { $Model = "$AgyModel-$(Limit-Effort $Effort 'high')" }
+    $Effort = $Model -replace '^.*-', ''
+} elseif ($Agent -eq 'hydrogen') {
+    $aq = Get-AgyQuota
+    if ($aq -and $aq.gemini -and -not $admin -and $aq.gemini.left -le $GeminiReserve -and -not $Major) {
+        Write-Host "[collab] hydrogen | shared Gemini weekly quota low ($(Format-Pct $aq.gemini.left) left, resets $($aq.gemini.reset)). Reserved for major decisions: re-run with -Major, or use codex."
+        exit 3
+    }
+    if (-not $Model) { $Model = "$HydrogenModel-$(Limit-Effort $HydrogenEffort 'xhigh')" }
+    $Effort = $Model -replace '^.*-', ''
 } elseif ($Agent -eq 'codex-run') {
     # separate conversation from 'codex': never switch model or effort inside one conversation
     if (-not $Model) { $Model = $CodexRunModel }
@@ -165,7 +193,7 @@ if ($Reset) { $reg.Remove($key); Save-Registry $reg; "$key session cleared for $
 $lock = Join-Path $collab "$key.lock"
 if (Test-Path $lock) {
     $lpid = [int](Get-Content $lock -Raw -ErrorAction SilentlyContinue)
-    if ($lpid -and (Get-Process -Id $lpid -ErrorAction SilentlyContinue)) { Write-Host "[collab] $key is busy with another call (pid $lpid) in this project. Wait for it or use the other agent."; exit 2 }
+    if ($lpid -and (Get-Process -Id $lpid -ErrorAction SilentlyContinue)) { Write-Host "[collab] $key is busy with another call (pid $lpid) in this project (possibly another Claude session). Wait for it, use another agent, or open a separate conversation with -Thread <name>."; exit 2 }
 }
 $PID | Set-Content $lock
 try {
@@ -174,10 +202,10 @@ $timeoutSec = $TimeoutMinutes * 60
 $sw = [Diagnostics.Stopwatch]::StartNew()
 
 if ($Compact) {
-    if ($Agent -ne 'agy') { 'codex compacts automatically; nothing to do.'; return }
-    if (-not $entry) { 'no agy session to compact'; return }
-    $r = Invoke-Proc $AgyExe @('--conversation', $entry.id, '--model', $entry.model, '--output-format', 'json', '--print-timeout', "$($TimeoutMinutes)m", '-p', '/compact') $null $root $timeoutSec
-    Write-Host "[collab] agy compact | session=$($entry.id) | exit=$($r.Code) | $([int]$sw.Elapsed.TotalSeconds)s"
+    if (-not $isGemini) { 'codex compacts automatically; nothing to do.'; return }
+    if (-not $entry) { "no $key session to compact"; return }
+    $r = Invoke-Proc $AgyExe @('--conversation', $entry.id, '--model', $entry.model, '--mode', 'plan', '--settings', $AgyDenyCommands, '--output-format', 'json', '--print-timeout', "$($TimeoutMinutes)m", '-p', '/compact') $null $root $timeoutSec
+    Write-Host "[collab] $key compact | session=$($entry.id) | exit=$($r.Code) | $([int]$sw.Elapsed.TotalSeconds)s"
     return
 }
 
@@ -202,10 +230,19 @@ Think independently: question the framing of the request, propose alternatives t
 
 "@
 } else {
+    # agy has no directory-listing or search tool once commands are denied: hand it the file list
+    $filesTxt = Join-Path $collab 'files.txt'
+    $isGit = [bool](git -C $root rev-parse --show-toplevel 2>$null)
+    $list = if ($isGit) { git -C $root ls-files --cached --others --exclude-standard 2>$null | Where-Object { $_ -notlike '.claude/collab/*' } }
+            else { Get-ChildItem $root -Recurse -File -Name -ErrorAction SilentlyContinue | Where-Object { $_ -notmatch '(^|\\)(\.git|node_modules|__pycache__|\.venv|venv)(\\|$)|^\.claude\\collab\\' } }
+    $list = @($list)
+    $cap = 20000
+    $hdr = "# files under $root ($($list.Count) total$(if ($list.Count -gt $cap) { ", first $cap shown" }); paths relative to the root)"
+    @($hdr) + @($list | Select-Object -First $cap) | Set-Content $filesTxt -Encoding utf8
     $preamble = @"
 [COLLABORATION CONTEXT] You are an independent research scientist advising the main agent (Claude Code) on the project at:
   $root
-You are in read-only mode: read any file you need, but do NOT run commands and do NOT create or edit files. Any such attempt is denied and aborts your whole turn, losing your answer.
+You are in read-only mode. Read any file you need with read_file. You have no directory-listing or search tool, so the full list of project files is in $filesTxt (refreshed for this turn): read it first when you need to find files. Shell commands are disabled for you (they fail with a permission error), and you must not create, edit or delete files. Do not ask for approval or write a plan for later: answer now, within this turn.
 Think independently: question the framing of the request, look for flaws, hidden assumptions and better alternatives the main agent may have missed, and back claims with evidence (file:line, reasoning, references). End with: conclusions, evidence, recommendations, open doubts. Be concise.
 
 "@
@@ -213,7 +250,7 @@ Think independently: question the framing of the request, look for flaws, hidden
 $full = $preamble + $Prompt
 
 # agy takes the prompt as a command-line argument (~32k limit): hand long prompts over as a file
-if ($Agent -eq 'agy' -and $full.Length -gt 20000) {
+if ($isGemini -and $full.Length -gt 20000) {
     $pf = Join-Path $collab ("prompt-{0:yyyyMMdd-HHmmss}.md" -f (Get-Date))
     $Prompt | Set-Content $pf -Encoding utf8
     $full = $preamble + "Your task is in this file; read it first and follow it: $pf"
@@ -242,7 +279,7 @@ function Invoke-Codex {
     [pscustomobject]@{ Id = $(if ($tid) { $tid } else { $entry.id }); Text = $text; Error = $err; Denied = @() }
 }
 function Invoke-Agy {
-    $argv = @('--model', $Model, '--mode', 'plan', '--output-format', 'json', '--print-timeout', "$($TimeoutMinutes)m")
+    $argv = @('--model', $Model, '--mode', 'plan', '--settings', $AgyDenyCommands, '--output-format', 'json', '--print-timeout', "$($TimeoutMinutes)m")
     if (-not $isNew) { $argv += @('--conversation', $entry.id) }
     $argv += @('-p', $full)
     $r = Invoke-Proc $AgyExe $argv $null $root ($timeoutSec + 60)
@@ -284,7 +321,10 @@ if ($res.Id) {
     $keepModel = if ($res.Error -and -not $isNew) { $entry.model } else { $Model }
     $created = if ($isNew) { (Get-Date).ToString('s') } else { $entry.created }
     $reg = Read-Registry
-    $reg[$key] = @{ id = $res.Id; model = $keepModel; turns = $turns; last = (Get-Date).ToString('s'); created = $created }
+    # one-line gist of the latest request, so other Claude sessions can see what this conversation is about (-Status)
+    $ask = (($Prompt -split "`n" | Where-Object { $_.Trim() -and $_ -notmatch '^\s*#+\s*$' } | Select-Object -First 2) -join ' ').Trim()
+    if ($ask.Length -gt 160) { $ask = $ask.Substring(0, 160) + '...' }
+    $reg[$key] = @{ id = $res.Id; model = $keepModel; turns = $turns; last = (Get-Date).ToString('s'); created = $created; lastAsk = $(if ($res.Error -and -not $isNew) { $entry.lastAsk } else { $ask }) }
     Save-Registry $reg
 }
 
@@ -292,7 +332,8 @@ if ($res.Id) {
 $secs = [int]$sw.Elapsed.TotalSeconds
 $quota = ''
 if ($Agent -like 'codex*') { $cq = Get-CodexRollout $res.Id; if ($cq) { $quota = "codex 5h used $($cq.h5)%, week used $($cq.week)% | context $($cq.ctx)%" } }
-elseif ($aq -and $aq.argon) { $quota = "Argon week left $(Format-Pct $aq.argon.left) (before this call)" }
+elseif ($Agent -eq 'agy' -and $aq -and $aq.argon) { $quota = "Argon week left $(Format-Pct $aq.argon.left) (before this call)" }
+elseif ($aq -and $aq.gemini) { $quota = "Gemini pool week left $(Format-Pct $aq.gemini.left), 5h left $(Format-Pct $aq.gemini5h.left) (before this call)" }
 $state = if ($isNew) { 'NEW conversation (include a project briefing)' } else { "resumed, turn $($reg[$key].turns)" }
 $header = "[collab] $key | model=$Model ($Effort) | $state | ${secs}s | session=$($res.Id) | $quota"
 Write-Host $header
