@@ -4,12 +4,17 @@
   keeping one persistent conversation per agent per project.
 
 .DESCRIPTION
-  codex     : independent senior engineer (gpt-6-astra). Reads the whole repo, runs commands,
+  codex     : Codex CLI, gpt-6-astra (high), frontier. Reads the whole repo, runs commands, network,
               writes ONLY under <root>/.claude/collab/work (enforced by the workspace-write sandbox).
-  codex-run : same sandbox, gpt-6.1-sol, for executing delegated tasks.
-  hydrogen  : agy CLI with Gemini 4 Hydrogen (xhigh). Read-only (--mode plan). Shared Gemini quota pool.
-  agy       : agy CLI with Gemini 4 Argon (high), the frontier Gemini. Read-only. Separate, small Argon quota.
-              Alias: argon.
+  codex-run : same sandbox, gpt-6.1-sol (medium), everyday: executes tasks and gives analysis.
+  hydrogen  : agy CLI, Gemini 4 Hydrogen (xhigh), everyday. Shared Gemini quota pool.
+  agy       : agy CLI, Gemini 4 Argon (high), frontier. Separate, small Argon quota. Alias: argon.
+
+  Both agy agents work as full agents: they read and search the repo, run Python and commands, search the
+  web and fetch pages. The top-level preamble injected into every call sets their limits (write only in
+  the workspace, never delete, no state-changing git, no installs). Backstops: PreToolUse hooks that block
+  writes outside the workspace, deletes, state-changing git and installs; and a git snapshot of the
+  working tree before and after every call, whose differences are reported in the header.
 
   Every answer is saved under <root>/.claude/collab/reports/. Sessions: <root>/.claude/collab/sessions.json.
 
@@ -38,10 +43,13 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $AgyExe = Join-Path $env:LOCALAPPDATA 'agy\bin\agy.exe'
-# Session-only settings (never saved). An explicit deny rule beats the user's global allow-list, and the
-# denial is returned to the model as a tool error. Without it, headless mode auto-denies any command that is
-# not allow-listed and ENDS THE TURN, losing the answer (Hydrogen reaches for the shell often).
-$AgyDenyCommands = '{"permissions":{"deny":["command(*)"]}}'
+# Session-only settings (never saved). Default agent mode (not Auto): Auto forces the terminal sandbox, which on
+# Windows cannot read projects under the user profile, write its own workspace, start Python from
+# %LOCALAPPDATA% or pass TLS through its proxy. Plan mode is not used either: in agy 1.5.9 it does not block
+# file writes, and it adds a plan-for-approval template. Commands are allowed (a headless run auto-denies
+# anything that needs approval and can end the turn); the hooks written to <work>/.agents/hooks.json are the
+# hard backstop for high-risk actions.
+$AgySettings = '{"agentMode":"","enableTerminalSandbox":false,"allowNonWorkspaceAccess":true,"permissions":{"allow":["command(*)"]}}'
 
 # --- configuration: env var > config.json > default --------------------------
 $cfgFile = Join-Path $PSScriptRoot '..\config.json'
@@ -66,6 +74,9 @@ $GeminiReserve = [double](Get-Setting 'COLLAB_GEMINI_RESERVE' 'geminiReserve' 0.
 # highest effort tier each agy model offers (agy models): Argon low..high, Hydrogen low..xhigh
 function Limit-Effort($e, $max) { $order = 'low', 'medium', 'high', 'xhigh'; $i = [array]::IndexOf($order, ($e -replace 'max', 'xhigh')); if ($i -lt 0) { $i = 2 }; $order[[math]::Min($i, [array]::IndexOf($order, $max))] }
 $CodexNetwork = "$(Get-Setting 'COLLAB_CODEX_NETWORK' 'codexNetwork' 'true')" -eq 'true'
+# Codex hooks off for advisor calls by default: a hook that rewrites commands (for example rtk's) makes them run a
+# wrapper inside the Windows sandbox, where it cannot read the user's config and every git/rg command fails.
+$CodexHooks   = "$(Get-Setting 'COLLAB_CODEX_HOOKS' 'codexHooks' 'false')" -eq 'true'
 $PythonExe    = Get-Setting 'COLLAB_PYTHON' 'python' ((Get-Command python -ErrorAction SilentlyContinue).Source)
 if (-not $TimeoutMinutes) { $TimeoutMinutes = [int](Get-Setting 'COLLAB_TIMEOUT_MINUTES' 'timeoutMinutes' 45) }
 
@@ -80,6 +91,49 @@ $regPath = Join-Path $collab 'sessions.json'
 foreach ($d in $collab, $work, $reports) { if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null } }
 $gi = Join-Path $collab '.gitignore'
 if (-not (Test-Path $gi)) { "*" | Set-Content $gi -Encoding utf8 }   # keep collab artifacts out of the repo
+
+$isGit = [bool](git -C $root rev-parse --show-toplevel 2>$null)
+
+# --- repository snapshot (backstop): the whole working tree as a git tree object ----------------------
+# Built in a temporary copy of the index, so the user's index, branches and stash are untouched. Untracked
+# files larger than 20 MB are not hashed into objects; they are compared by size and time instead.
+function Get-Snapshot {
+    if (-not $isGit) { return $null }
+    $idx = [IO.Path]::GetTempFileName(); $spec = [IO.Path]::GetTempFileName()
+    try {
+        $gi = (git -C $root rev-parse --git-path index).Trim()
+        if (-not [IO.Path]::IsPathRooted($gi)) { $gi = Join-Path $root $gi }
+        if (Test-Path $gi) { Copy-Item $gi $idx -Force } else { Remove-Item $idx }
+        $big = @{}
+        $lines = @('.')
+        foreach ($f in (git -C $root ls-files -o --exclude-standard -z 2>$null) -split "`0") {
+            if (-not $f) { continue }
+            $fi = Get-Item -LiteralPath (Join-Path $root $f) -ErrorAction SilentlyContinue
+            if ($fi -and $fi.Length -gt 20MB) { $big[$f] = "$($fi.Length)|$($fi.LastWriteTimeUtc.Ticks)"; $lines += ":(exclude,literal)$f" }
+        }
+        $lines | Set-Content $spec -Encoding utf8
+        $env:GIT_INDEX_FILE = $idx
+        git -C $root add -A --pathspec-from-file="$spec" 2>$null | Out-Null
+        $tree = (git -C $root write-tree 2>$null)
+        $refs = (git -C $root for-each-ref --format='%(refname) %(objectname)' 2>$null) -join "`n"
+        $head = (git -C $root rev-parse HEAD 2>$null)
+        return @{ tree = "$tree".Trim(); refs = $refs; head = "$head".Trim(); big = $big }
+    } catch { return $null }
+    finally { Remove-Item Env:GIT_INDEX_FILE -ErrorAction SilentlyContinue; Remove-Item $idx, $spec -ErrorAction SilentlyContinue }
+}
+function Compare-Snapshot($a, $b) {
+    $msgs = @()
+    if (-not $a -or -not $b -or -not $a.tree -or -not $b.tree) { return @('repo check: snapshot unavailable') }
+    $diff = @(git -C $root diff-tree -r --name-status $a.tree $b.tree 2>$null | Where-Object { $_ })
+    foreach ($k in (@($a.big.Keys) + @($b.big.Keys) | Sort-Object -Unique)) { if ($a.big[$k] -ne $b.big[$k]) { $diff += "M?`t$k (large untracked file)" } }
+    if ($diff) {
+        $msgs += "WARNING: the repository changed during the call (may include your own concurrent edits): $(($diff | ForEach-Object { $_ -replace "`t", ' ' }) -join '; ')"
+        $msgs += "  pre-call snapshot: tree $($a.tree). Restore a file: git restore --source=$($a.tree) --worktree -- <path>. Remove added files by hand."
+    }
+    if ($a.refs -ne $b.refs -or $a.head -ne $b.head) { $msgs += "WARNING: git refs or HEAD changed during the call (HEAD $($a.head) -> $($b.head)). Check git log and git reflog." }
+    if (-not $msgs) { $msgs += 'repo check: no changes outside .claude/collab' }
+    $msgs
+}
 
 function Read-Registry { if (Test-Path $regPath) { try { return Get-Content $regPath -Raw | ConvertFrom-Json -AsHashtable } catch {} }; return @{} }
 function Save-Registry($reg) { $reg | ConvertTo-Json -Depth 5 | Set-Content -Path $regPath -Encoding utf8 }
@@ -154,6 +208,7 @@ $isGemini = $Agent -in 'agy', 'hydrogen'
 
 # --- choose model / session key ------------------------------------------------
 $key = if ($Thread) { "$Agent@$Thread" } else { $Agent }   # one conversation (and lock) per key
+$guardLog = Join-Path $collab "guard-$key.log"               # agy guard decisions for this conversation
 $note = $null
 $admin = $Reset -or $Compact   # bookkeeping calls are never blocked by quota
 if ($Agent -eq 'agy') {
@@ -204,7 +259,7 @@ $sw = [Diagnostics.Stopwatch]::StartNew()
 if ($Compact) {
     if (-not $isGemini) { 'codex compacts automatically; nothing to do.'; return }
     if (-not $entry) { "no $key session to compact"; return }
-    $r = Invoke-Proc $AgyExe @('--conversation', $entry.id, '--model', $entry.model, '--mode', 'plan', '--settings', $AgyDenyCommands, '--output-format', 'json', '--print-timeout', "$($TimeoutMinutes)m", '-p', '/compact') $null $root $timeoutSec
+    $r = Invoke-Proc $AgyExe @('--conversation', $entry.id, '--model', $entry.model, '--settings', $AgySettings, '--output-format', 'json', '--print-timeout', "$($TimeoutMinutes)m", '-p', '/compact') $null $work $timeoutSec
     Write-Host "[collab] $key compact | session=$($entry.id) | exit=$($r.Code) | $([int]$sw.Elapsed.TotalSeconds)s"
     return
 }
@@ -214,39 +269,41 @@ if ($PromptFile) { $Prompt = Get-Content $PromptFile -Raw }
 if (-not $Prompt) { throw 'Provide -Prompt or -PromptFile' }
 $isNew = -not ($entry -and $entry.id)
 
+$py = if ($PythonExe) { "Python: $PythonExe (call it by its full path)." } else { 'Python: not configured; use what is on PATH.' }
 if ($Agent -like 'codex*') {
-    $role = if ($Agent -eq 'codex-run') { 'a research engineer executing a delegated task: carry it out end to end (run the code, check the results) and report what you did and found' }
+    $role = if ($Agent -eq 'codex-run') { 'a research engineer: carry out what is asked end to end (run the code, check the results), report what you did and found, and give your own analysis' }
             else { 'an independent senior research engineer and reviewer: give your own analysis, critique and recommendations, running checks when they help' }
-    $py =if ($PythonExe) { "Python: $PythonExe (call it by full path; it is not on PATH inside your sandbox)." } else { '' }
-    $net = if ($CodexNetwork -or $Yolo) { 'Network access is available.' } else { 'No network access.' }
-    if ($Yolo) { $py = "Python: $PythonExe. You are running WITHOUT a sandbox for this task, so the write boundary below is a rule you must keep, not a technical limit." }
-    $preamble = @"
-[COLLABORATION CONTEXT] You are $role, working alongside the main agent (Claude Code) on the project at:
-  $root
-You can read the entire repository and run commands (tests, scripts, experiments). $py $net
-WRITE ONLY under $work (your workspace: scratch scripts, outputs, notes). Never modify, create or delete files anywhere else in the repository: the main agent owns the code. To propose a code change, write a unified diff to $work\patches\<name>.patch and describe it.
-Do not run git commands that change state. Do not read or print secrets (.env, keys, tokens).
-Think independently: question the framing of the request, propose alternatives the main agent may not have considered, and back claims with evidence (file:line, command output, numbers). End with: conclusions, evidence, recommendations, open doubts. Be concise.
-
-"@
+    $can = "Read the whole repository, search it (rg, read-only git), and run commands, scripts and tests. $py " + $(if ($CodexNetwork -or $Yolo) { 'Use your web search tool for literature, documentation and facts (HTTPS downloads from the shell may fail inside the sandbox).' } else { 'No network access.' }) + ' If a command wrapper (for example rtk) fails inside the sandbox, run the command directly.'
+    $enforce = if ($Yolo) { "You are running WITHOUT a sandbox for this task, so the limits below are rules you must keep, not technical limits." }
+               else { "Your sandbox lets you write only under $work; writes elsewhere fail." }
+    $headless = ''
 } else {
-    # agy has no directory-listing or search tool once commands are denied: hand it the file list
-    $filesTxt = Join-Path $collab 'files.txt'
-    $isGit = [bool](git -C $root rev-parse --show-toplevel 2>$null)
-    $list = if ($isGit) { git -C $root ls-files --cached --others --exclude-standard 2>$null | Where-Object { $_ -notlike '.claude/collab/*' } }
-            else { Get-ChildItem $root -Recurse -File -Name -ErrorAction SilentlyContinue | Where-Object { $_ -notmatch '(^|\\)(\.git|node_modules|__pycache__|\.venv|venv)(\\|$)|^\.claude\\collab\\' } }
-    $list = @($list)
-    $cap = 20000
-    $hdr = "# files under $root ($($list.Count) total$(if ($list.Count -gt $cap) { ", first $cap shown" }); paths relative to the root)"
-    @($hdr) + @($list | Select-Object -First $cap) | Set-Content $filesTxt -Encoding utf8
-    $preamble = @"
-[COLLABORATION CONTEXT] You are an independent research scientist advising the main agent (Claude Code) on the project at:
+    $role = 'an independent senior research scientist and engineer: give your own analysis, critique and recommendations, running checks when they help'
+    $can = "Read any file; search the repository with shell commands (rg, Get-ChildItem, read-only git: log, show, diff, blame, grep); run Python, scripts and tests ($py) Search the web with search_web and fetch pages (for example Invoke-WebRequest) for literature, documentation and facts. Use subagents only when the work clearly splits: they spend the same quota."
+    $enforce = 'Guards enforce these limits as a backstop. A denied action means it broke a rule: do not retry it another way.'
+    $headless = "`n- You run headless: nobody can answer questions or approve plans. Do not ask and do not write a plan for approval. Decide, state your assumptions, and answer within this turn."
+}
+$preamble = @"
+[COLLABORATION CONTEXT] You are $role. You work alongside the main agent (Claude Code), which owns the code and makes the decisions, on the project at:
   $root
-You are in read-only mode. Read any file you need with read_file. You have no directory-listing or search tool, so the full list of project files is in $filesTxt (refreshed for this turn): read it first when you need to find files. Shell commands are disabled for you (they fail with a permission error), and you must not create, edit or delete files. Do not ask for approval or write a plan for later: answer now, within this turn.
-Think independently: question the framing of the request, look for flaws, hidden assumptions and better alternatives the main agent may have missed, and back claims with evidence (file:line, reasoning, references). End with: conclusions, evidence, recommendations, open doubts. Be concise.
+Your workspace, for scratch scripts, outputs, notes and patches: $work
+
+What you can do: $can
+
+Limits (set by the project owner; not negotiable):
+- Do not change the repository. Create or edit files only under $work, using absolute paths. To propose a code change, write a unified diff to $work\patches\<name>.patch and describe it.
+- Never delete files, not even in your workspace (overwrite them instead). Never run state-changing git (commit, checkout, reset, stash, push, pull, merge, ...). Never install or remove packages or environments. If one of these is needed, say so in your answer.
+- Do not read or print secrets (.env files, keys, tokens).
+- Keep runs proportionate: no long training or heavy GPU jobs unless the request asks for them.$headless
+$enforce
+
+How to work:
+- Form your own view from primary sources: code, result files, logs and data. The main agent's summary in the request can be incomplete or wrong; check the facts that matter yourself and say when they do not hold.
+- The owner's stated direction and constraints (in the request, the project briefing or STATUS.md) are binding. Within them, look for the strongest way to succeed, not only for flaws: give both critique and constructive alternatives.
+- Question the framing of the request, propose approaches the main agent may have missed, and back claims with evidence (file:line, command output, numbers, references with URLs). State your doubts explicitly.
+- End with: conclusions, evidence, recommendations, open doubts. Be concise.
 
 "@
-}
 $full = $preamble + $Prompt
 
 # agy takes the prompt as a command-line argument (~32k limit): hand long prompts over as a file
@@ -260,7 +317,9 @@ if ($isGemini -and $full.Length -gt 20000) {
 function Invoke-Codex {
     $sandbox = if ($Yolo) { @('--dangerously-bypass-approvals-and-sandbox') }
                else { @('-c', 'sandbox_mode="workspace-write"', '-c', "sandbox_workspace_write.network_access=$($CodexNetwork.ToString().ToLower())") }
-    $common = @('-m', $Model, '-c', "model_reasoning_effort=$Effort") + $sandbox + @('--skip-git-repo-check', '--json')
+    $search = if ($CodexNetwork -or $Yolo) { @('-c', 'web_search="live"') } else { @() }   # explicit, not left to the user's config.toml
+    $hooksOff = if ($CodexHooks) { @() } else { @('--disable', 'hooks') }
+    $common = @('-m', $Model, '-c', "model_reasoning_effort=$Effort") + $sandbox + $search + $hooksOff + @('--skip-git-repo-check', '--json')
     $argv = if ($isNew) { @('exec') + $common + @('-') } else { @('exec', 'resume', $entry.id) + $common + @('-') }
     $r = Invoke-Proc 'codex' $argv $full $work $timeoutSec
     $tid = $null; $text = $null; $err = $null
@@ -278,32 +337,37 @@ function Invoke-Codex {
     elseif (-not $text -and -not $err) { $err = "no answer (exit $($r.Code)) $($r.Err.Trim())" }
     [pscustomobject]@{ Id = $(if ($tid) { $tid } else { $entry.id }); Text = $text; Error = $err; Denied = @() }
 }
+# agy loads hooks from the launch directory's .agents/; they also cover its subagents (verified, agy 1.5.9).
+# Written fresh every call so the paths always match this project.
+function Write-AgyHooks {
+    if (-not $PythonExe) { throw 'agy agents need Python for their guard hooks: set COLLAB_PYTHON or "python" in config.json' }
+    $dir = Join-Path $work '.agents'
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $envs = "set `"GUARD_WORK=$work`" && set `"GUARD_LOG=$guardLog`" && "
+    $hooks = @{ 'advisor-guard' = @{ PreToolUse = @(
+        @{ matcher = 'write_file|edit_file'; hooks = @(@{ type = 'command'; timeout = 20; command = $envs + "`"$PythonExe`" `"$PSScriptRoot\guard_write.py`"" }) },
+        @{ matcher = 'run_command';          hooks = @(@{ type = 'command'; timeout = 20; command = $envs + "`"$PythonExe`" `"$PSScriptRoot\guard_cmd.py`"" }) }
+    ) } }
+    $hooks | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $dir 'hooks.json') -Encoding utf8
+}
 function Invoke-Agy {
-    $argv = @('--model', $Model, '--mode', 'plan', '--settings', $AgyDenyCommands, '--output-format', 'json', '--print-timeout', "$($TimeoutMinutes)m")
+    Write-AgyHooks
+    $argv = @('--model', $Model, '--settings', $AgySettings, '--output-format', 'json', '--print-timeout', "$($TimeoutMinutes)m")
     if (-not $isNew) { $argv += @('--conversation', $entry.id) }
     $argv += @('-p', $full)
-    $r = Invoke-Proc $AgyExe $argv $null $root ($timeoutSec + 60)
+    $r = Invoke-Proc $AgyExe $argv $null $work ($timeoutSec + 60)
     if ($r.TimedOut) { return [pscustomobject]@{ Id = $entry.id; Text = $null; Error = "timed out after $TimeoutMinutes min (process tree killed)"; Denied = @() } }
     try { $j = $r.Out | ConvertFrom-Json } catch { return [pscustomobject]@{ Id = $entry.id; Text = $null; Error = "unparseable agy output: $($r.Out) $($r.Err)".Trim(); Denied = @() } }
     $denied = @($j.denied_actions | Where-Object { $_ } | ForEach-Object { $_.action })
     $e = $null
     if ($j.status -ne 'SUCCESS') { $e = "status=$($j.status) $($r.Err)".Trim() }
-    elseif (-not $j.response) { $e = $(if ($denied) { "turn aborted: it attempted a denied action ($($denied -join ', ')); rephrase so it only reads and reasons" } else { "empty response $($r.Err)".Trim() }) }
+    elseif (-not $j.response) { $e = $(if ($denied) { "turn aborted: it attempted an action that needed approval ($($denied -join ', '))" } else { "empty response $($r.Err)".Trim() }) }
     [pscustomobject]@{ Id = $j.conversation_id; Text = $j.response; Error = $e; Denied = $denied }
 }
 
-# without a sandbox, detect repository changes outside .claude/collab made during the call
-function Get-RepoState {
-    $s = @{}
-    foreach ($l in (git -C $root status --porcelain -uall 2>$null)) {
-        $f = $l.Substring(3).Trim('"')
-        if ($f -like '.claude/collab/*') { continue }
-        $p = Join-Path $root $f
-        $s[$f] = if (Test-Path $p -PathType Leaf) { (Get-FileHash $p -Algorithm SHA1).Hash } else { 'deleted' }
-    }
-    $s
-}
-$before = if ($Yolo) { Get-RepoState } else { $null }
+# backstop for every agent: snapshot the working tree now and compare after the call
+$before = Get-Snapshot
+$guardStart = if (Test-Path $guardLog) { @(Get-Content $guardLog).Count } else { 0 }
 
 $res = $null
 for ($i = 1; $i -le ($Retries + 1); $i++) {
@@ -338,16 +402,18 @@ $state = if ($isNew) { 'NEW conversation (include a project briefing)' } else { 
 $header = "[collab] $key | model=$Model ($Effort) | $state | ${secs}s | session=$($res.Id) | $quota"
 Write-Host $header
 if ($note) { Write-Host "[collab] NOTE: $note" }
-if ($Yolo) {
-    $after = Get-RepoState
-    $changed = @($after.Keys + $before.Keys | Sort-Object -Unique | Where-Object { $before[$_] -ne $after[$_] })
-    if ($changed) { Write-Host "[collab] WARNING (yolo): repository files changed during the call, outside .claude/collab (may include your own concurrent edits): $($changed -join ', ')" }
-    else { Write-Host '[collab] yolo: no repository changes outside .claude/collab' }
+# backstop results: repository changes during the call, and actions the guards blocked
+$checks = @()
+if ($isGit) { $checks += Compare-Snapshot $before (Get-Snapshot) } else { $checks += 'repo check: not a git repository, no snapshot' }
+if ($isGemini -and (Test-Path $guardLog)) {
+    $blocked = @(Get-Content $guardLog | Select-Object -Skip $guardStart | ForEach-Object { try { $_ | ConvertFrom-Json } catch {} } | Where-Object { $_.decision -eq 'deny' })
+    if ($blocked) { $checks += "guard blocked $($blocked.Count) action(s): $(($blocked | ForEach-Object { if ($_.cmd) { $_.cmd } else { "$($_.tool) $($_.args.Path)" } } | Select-Object -First 5) -join ' | ')" }
 }
+foreach ($c in $checks) { Write-Host "[collab] $c" }
 if ($res.Error) { Write-Host "[collab] ERROR: $($res.Error)"; if ($res.Error -match 'timed out') { exit 124 }; exit 1 }
 
 $rp = Join-Path $reports ("{0:yyyyMMdd-HHmmss}-{1}.md" -f (Get-Date), $key)
-@("# $key report", '', $header, $(if ($note) { "NOTE: $note" }), '', '## Request', '', $Prompt.Trim(), '', '## Answer', '', $res.Text) | Set-Content $rp -Encoding utf8
+@("# $key report", '', $header, $(if ($note) { "NOTE: $note" }), ($checks | ForEach-Object { "[collab] $_" }), '', '## Request', '', $Prompt.Trim(), '', '## Answer', '', $res.Text) | Set-Content $rp -Encoding utf8
 Write-Host "[collab] saved: $rp"
 $res.Text
 

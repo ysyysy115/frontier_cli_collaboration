@@ -10,6 +10,7 @@
   "argonStop": 0.05,
   "geminiReserve": 0.10,
   "codexNetwork": true,
+  "codexHooks": false,
   "timeoutMinutes": 45,
   "python": ""
 }

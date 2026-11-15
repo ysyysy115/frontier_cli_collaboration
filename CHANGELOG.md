@@ -1,5 +1,29 @@
 # Changelog
 
+## 2026-11-15: agy as a full agent; preamble first, backstops second
+
+Tested with codex-cli 0.167.2 and agy 1.5.9 on Windows 11 24H2.
+
+### Why
+- In agy 1.5.9, `--mode plan` no longer blocks `write_file`: a probe file was written to the repository. The read-only guarantee the skill relied on was gone.
+- The `deny command(*)` rule left agy with `read_file` and `search_web` only: no search, no Python, no git. In 52 reports agy never cited a web source.
+- Auto mode is no alternative here: it forces the Windows terminal sandbox, which in testing could not read the user profile, write its own workspace, start Python from `%LOCALAPPDATA%` or pass TLS, and its reviewer approved commands leaving the sandbox.
+
+### Changed
+- **agy (`hydrogen`, `agy`) runs as a full agent**: default mode, no terminal sandbox, all commands allowed for the session (`--settings`), launched in `.claude/collab/work/`. It searches the repo (`rg`, read-only git), runs Python and tests, searches the web and fetches pages.
+- **New top-level preamble for every agent**, the main control: role; what it can do; the limits (write only in the workspace, never delete, no state-changing git, no installs, no secrets, headless: do not ask, answer within the turn); and how to work (form its own view from primary sources instead of trusting Claude's summary, treat the owner's direction as binding, give constructive alternatives as well as critique, cite evidence). In testing, Hydrogen refused a request to edit, delete and commit on its own.
+- **Tiers**: `codex-run` (Sol) and `hydrogen` are the everyday pair, `codex` (Astra) and `agy` (Argon) the frontier pair; all four for major decisions. The `codex-run` role now covers analysis as well as execution.
+- SKILL.md: request-writing guidance (briefing as pointers plus the owner's direction in their words, kept current; facts with sources; no anchoring on your own options; ask how to succeed, not only what is wrong; batching rhythm); advisor agreement is input, not a decision; `-Major` only for genuinely major decisions.
+
+### Added
+- **Guard hooks for agy** (backstop): `scripts/guard_write.py` lets `write_file`/`edit_file` write only under `work/`; `scripts/guard_cmd.py` blocks deletes, state-changing git (read-only git stays allowed) and package installs. Written to `work/.agents/hooks.json` before each call; fail closed; cover subagents; decisions logged to `.claude/collab/guard-<agent>.log`, and blocked actions are reported in the header.
+- **Codex**: web search is enabled explicitly (`-c web_search="live"` with network on) instead of relying on the user's `config.toml`. Codex hooks are disabled for advisor calls (`--disable hooks`; `codexHooks: true` keeps them): rtk's command-rewriting hook made every git and rg command fail inside the Windows sandbox. The preamble tells codex to prefer its web search tool (shell HTTPS downloads fail in the sandbox) and to run commands directly if a wrapper fails.
+- **Repository check for every agent** (backstop): the working tree is snapshotted as a git tree object before and after each call, in a temporary copy of the index (the user's index, branches and stash are untouched; untracked files over 20 MB are compared by size and time). Changes and moved refs are reported in the header with a restore command. This replaces the `-Yolo`-only change report.
+
+### Removed
+- `--mode plan` and the `deny command(*)` rule for agy.
+- `files.txt` (agy can list and search the repo itself now).
+
 ## 2026-11-13: Gemini 4 Hydrogen, threads, agy 1.5.8
 
 Tested with codex-cli 0.164.0 and agy 1.5.8.
