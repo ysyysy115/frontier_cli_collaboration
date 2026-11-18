@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-11-17: GPT-6.2
+
+Tested with codex-cli 0.169.1 and agy 1.5.8.
+
+### Changed
+- Defaults are now `gpt-6.2-astra` (`codex`, frontier) and `gpt-6.2-sol` (`codex-run`, everyday). They appear in `codex debug models` from codex-cli 0.169; older CLI versions do not list them, so update the CLI or pin the old ids with `COLLAB_CODEX_MODEL` / `COLLAB_CODEX_RUN_MODEL`.
+- `codex-run` effort is now `high` (was `medium`); `codex` stays at `high`. The new `max` and `ultra` levels are not used by default.
+
 ## 2026-11-15: agy as a full agent; preamble first, backstops second
 
 Tested with codex-cli 0.167.2 and agy 1.5.9 on Windows 11 24H2.

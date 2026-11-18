@@ -2,7 +2,7 @@
 
 A [Claude Code](https://claude.com/claude-code) skill that gives Claude frontier-model collaborators, driven through their own agent CLIs:
 
-- **OpenAI Codex CLI** (`codex`): GPT-6.1 Sol for everyday work, GPT-6 Astra (frontier) for the hardest questions
+- **OpenAI Codex CLI** (`codex`): GPT-6.2 Sol for everyday work, GPT-6.2 Astra (frontier) for the hardest questions
 - **Google Antigravity CLI** (`agy`): Gemini 4 Hydrogen for everyday work, Gemini 4 Argon (frontier) for the hardest questions
 
 Each CLI gets two conversations per project, one per model. Everyday questions go to the everyday pair (Sol and Hydrogen); the hardest and most consequential ones to the frontier pair (Astra and Argon); a major decision can use all four at once.
@@ -13,8 +13,8 @@ Claude stays the main agent: it owns the code, decides and integrates. The colla
 
 | Name | Default model | Role | Can | Writes |
 |---|---|---|---|---|
-| `codex` | `gpt-6-astra`, high | Frontier: hard reviews, critique, design alternatives, red-teaming | Read and search the repo, run commands, network and web search | Only `.claude/collab/work/` (sandbox) |
-| `codex-run` | `gpt-6.1-sol`, medium | Everyday: experiments, reproductions, checks, analysis, routine review. Faster and cheaper. | Same | Same |
+| `codex` | `gpt-6.2-astra`, high | Frontier: hard reviews, critique, design alternatives, red-teaming | Read and search the repo, run commands, network and web search | Only `.claude/collab/work/` (sandbox) |
+| `codex-run` | `gpt-6.2-sol`, high | Everyday: experiments, reproductions, checks, analysis, routine review. Faster and cheaper. | Same | Same |
 | `hydrogen` | `gemini-4-hydrogen`, xhigh | Everyday: method critique, theory, experiment design, plan and document review. Large shared quota. | Read and search the repo, run Python and commands, web search, fetch pages, subagents | Only `.claude/collab/work/` (by instruction; guards and a git check as backstop) |
 | `agy` (alias `argon`) | `gemini-4-argon`, high | Frontier: the hardest, most consequential questions. Small separate quota. | Same as `hydrogen` | Same as `hydrogen` |
 
@@ -58,9 +58,9 @@ Find the model ids available to your account with `codex debug models` and `agy 
 
 | Setting | Env var | `config.json` | Default |
 |---|---|---|---|
-| Codex opinion model | `COLLAB_CODEX_MODEL` | `codexModel` | `gpt-6-astra` |
-| Codex task model | `COLLAB_CODEX_RUN_MODEL` | `codexRunModel` | `gpt-6.1-sol` |
-| Codex task effort | `COLLAB_CODEX_RUN_EFFORT` | `codexRunEffort` | `medium` |
+| Codex opinion model | `COLLAB_CODEX_MODEL` | `codexModel` | `gpt-6.2-astra` |
+| Codex task model | `COLLAB_CODEX_RUN_MODEL` | `codexRunModel` | `gpt-6.2-sol` |
+| Codex task effort | `COLLAB_CODEX_RUN_EFFORT` | `codexRunEffort` | `high` |
 | Argon model (no effort suffix) | `COLLAB_AGY_MODEL` | `agyModel` | `gemini-4-argon` |
 | Hydrogen model (no effort suffix) | `COLLAB_HYDROGEN_MODEL` | `hydrogenModel` | `gemini-4-hydrogen` |
 | Hydrogen effort (up to `xhigh`) | `COLLAB_HYDROGEN_EFFORT` | `hydrogenEffort` | `xhigh` |

@@ -4,9 +4,9 @@
   keeping one persistent conversation per agent per project.
 
 .DESCRIPTION
-  codex     : Codex CLI, gpt-6-astra (high), frontier. Reads the whole repo, runs commands, network,
+  codex     : Codex CLI, gpt-6.2-astra (high), frontier. Reads the whole repo, runs commands, network,
               writes ONLY under <root>/.claude/collab/work (enforced by the workspace-write sandbox).
-  codex-run : same sandbox, gpt-6.1-sol (medium), everyday: executes tasks and gives analysis.
+  codex-run : same sandbox, gpt-6.2-sol (high), everyday: executes tasks and gives analysis.
   hydrogen  : agy CLI, Gemini 4 Hydrogen (xhigh), everyday. Shared Gemini quota pool.
   agy       : agy CLI, Gemini 4 Argon (high), frontier. Separate, small Argon quota. Alias: argon.
 
@@ -61,9 +61,9 @@ function Get-Setting($envName, $key, $fallback) {
     if ($null -ne $cfg[$key] -and "$($cfg[$key])" -ne '') { return $cfg[$key] }
     return $fallback
 }
-$CodexModel   = Get-Setting 'COLLAB_CODEX_MODEL' 'codexModel' 'gpt-6-astra'          # codex: opinions, review
-$CodexRunModel  = Get-Setting 'COLLAB_CODEX_RUN_MODEL' 'codexRunModel' 'gpt-6.1-sol'  # codex-run: executing tasks
-$CodexRunEffort = Get-Setting 'COLLAB_CODEX_RUN_EFFORT' 'codexRunEffort' 'medium'
+$CodexModel   = Get-Setting 'COLLAB_CODEX_MODEL' 'codexModel' 'gpt-6.2-astra'          # codex: opinions, review
+$CodexRunModel  = Get-Setting 'COLLAB_CODEX_RUN_MODEL' 'codexRunModel' 'gpt-6.2-sol'  # codex-run: executing tasks
+$CodexRunEffort = Get-Setting 'COLLAB_CODEX_RUN_EFFORT' 'codexRunEffort' 'high'
 $AgyModel     = Get-Setting 'COLLAB_AGY_MODEL' 'agyModel' 'gemini-4-argon'      # without effort suffix
 $HydrogenModel  = Get-Setting 'COLLAB_HYDROGEN_MODEL' 'hydrogenModel' 'gemini-4-hydrogen'
 $HydrogenEffort = Get-Setting 'COLLAB_HYDROGEN_EFFORT' 'hydrogenEffort' 'xhigh'

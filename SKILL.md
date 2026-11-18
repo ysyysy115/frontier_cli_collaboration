@@ -1,13 +1,13 @@
 ---
 name: advisors
-description: Work with frontier agents from OpenAI Codex CLI (gpt-6.1-sol, gpt-6-astra) and Google Antigravity CLI (agy: Gemini 4 Hydrogen and Gemini 4 Argon) as independent collaborators that read and search the whole repo, run code, use the web and give their own analysis, so you and the user do not get stuck in a local optimum. Use at the start of significant tasks (independent approaches before you commit), to delegate investigations or experiments, to red-team a plan or result, when results surprise you, when stuck, before declaring a non-trivial result correct, or when the user says "ask codex", "ask agy/gemini/hydrogen/argon", "second opinion". Keeps one persistent conversation per agent per project.
+description: Work with frontier agents from OpenAI Codex CLI (gpt-6.2-sol, gpt-6.2-astra) and Google Antigravity CLI (agy: Gemini 4 Hydrogen and Gemini 4 Argon) as independent collaborators that read and search the whole repo, run code, use the web and give their own analysis, so you and the user do not get stuck in a local optimum. Use at the start of significant tasks (independent approaches before you commit), to delegate investigations or experiments, to red-team a plan or result, when results surprise you, when stuck, before declaring a non-trivial result correct, or when the user says "ask codex", "ask agy/gemini/hydrogen/argon", "second opinion". Keeps one persistent conversation per agent per project.
 ---
 
 # Frontier collaborators: Codex and agy
 
 You are the main agent. You own the code, decide, and integrate. The advisors are frontier models with their own agent loops: they read and search the repository, run code and use the web themselves, so you do not have to relay context, and the user does not have to be the messenger. Their value is **independent perspective**: they catch what you and the user both missed and break you out of local optima. Use them as strong colleagues, not as a chat box.
 
-| | `codex-run` (`gpt-6.1-sol`, medium) | `hydrogen` (`gemini-4-hydrogen`, xhigh) | `codex` (`gpt-6-astra`, high) | `agy` (`gemini-4-argon`, high) |
+| | `codex-run` (`gpt-6.2-sol`, high) | `hydrogen` (`gemini-4-hydrogen`, xhigh) | `codex` (`gpt-6.2-astra`, high) | `agy` (`gemini-4-argon`, high) |
 |---|---|---|---|---|
 | Tier | **Everyday** | **Everyday** | **Frontier** | **Frontier** |
 | Role | Research engineer: carries out tasks end to end and gives analysis | Research scientist and engineer: opinions, checks | Senior engineer and reviewer: opinions | Senior research scientist: opinions |

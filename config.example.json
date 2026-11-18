@@ -1,7 +1,7 @@
 {
-  "codexModel": "gpt-6-astra",
-  "codexRunModel": "gpt-6.1-sol",
-  "codexRunEffort": "medium",
+  "codexModel": "gpt-6.2-astra",
+  "codexRunModel": "gpt-6.2-sol",
+  "codexRunEffort": "high",
   "agyModel": "gemini-4-argon",
   "hydrogenModel": "gemini-4-hydrogen",
   "hydrogenEffort": "xhigh",
