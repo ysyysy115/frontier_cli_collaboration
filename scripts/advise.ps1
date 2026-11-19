@@ -8,7 +8,8 @@
               writes ONLY under <root>/.claude/collab/work (enforced by the workspace-write sandbox).
   codex-run : same sandbox, gpt-6.2-sol (high), everyday: executes tasks and gives analysis.
   hydrogen  : agy CLI, Gemini 4 Hydrogen (xhigh), everyday. Shared Gemini quota pool.
-  agy       : agy CLI, Gemini 4 Argon (high), frontier. Separate, small Argon quota. Alias: argon.
+  neon      : agy CLI, Gemini 4 Neon (medium), frontier. Shared Gemini quota pool.
+  argon     : agy CLI, Gemini 4 Argon (high), the largest Google model. Separate, small Argon quota. Alias: agy.
 
   Both agy agents work as full agents: they read and search the repo, run Python and commands, search the
   web and fetch pages. The top-level preamble injected into every call sets their limits (write only in
@@ -27,10 +28,10 @@
   advise.ps1 -Agent codex -Reset
 #>
 param(
-    [ValidateSet('codex', 'codex-run', 'hydrogen', 'agy', 'argon')][string]$Agent,
+    [string]$Agent,
     [string]$PromptFile,
     [string]$Prompt,
-    [switch]$Major,          # agy/hydrogen: allowed to spend the quota reserve (major decision)
+    [switch]$Major,          # neon/hydrogen: allowed to spend the quota reserve (major decision)
     [switch]$Yolo,           # codex-run only: no sandbox, for checks the sandbox blocks (GPU, data outside the repo)
     [switch]$Status,
     [switch]$Reset,
@@ -64,14 +65,24 @@ function Get-Setting($envName, $key, $fallback) {
 $CodexModel   = Get-Setting 'COLLAB_CODEX_MODEL' 'codexModel' 'gpt-6.2-astra'          # codex: opinions, review
 $CodexRunModel  = Get-Setting 'COLLAB_CODEX_RUN_MODEL' 'codexRunModel' 'gpt-6.2-sol'  # codex-run: executing tasks
 $CodexRunEffort = Get-Setting 'COLLAB_CODEX_RUN_EFFORT' 'codexRunEffort' 'high'
-$AgyModel     = Get-Setting 'COLLAB_AGY_MODEL' 'agyModel' 'gemini-4-argon'      # without effort suffix
-$HydrogenModel  = Get-Setting 'COLLAB_HYDROGEN_MODEL' 'hydrogenModel' 'gemini-4-hydrogen'
-$HydrogenEffort = Get-Setting 'COLLAB_HYDROGEN_EFFORT' 'hydrogenEffort' 'xhigh'
+# --- Google (agy) agents: ONE ROW PER AGENT. Google models change fast; to add or swap one, edit this table. ---
+#   Model  : agy model id without the effort suffix (`agy models` lists <Model>-<effort>)
+#   Effort : default effort; Max: highest effort that model offers (a larger request is lowered to it)
+#   Pool   : which quota it draws on: 'gemini' (shared pool, weekly) or 'argon' (its own small weekly quota)
+#   Reserve: below this fraction left the agent needs -Major;  Stop: at or below it the agent is off until reset (0 = never)
+#   Each agent is its own persistent conversation (session key = agent name).
+#   Every row can be overridden with COLLAB_<NAME>_MODEL / COLLAB_<NAME>_EFFORT or <name>Model / <name>Effort in config.json.
+function New-GeminiAgent($name, $model, $effort, $max, $pool, $reserve, $stop) {
+    $U = $name.ToUpper()
+    @{ Model = Get-Setting "COLLAB_${U}_MODEL" "${name}Model" $model; Effort = Get-Setting "COLLAB_${U}_EFFORT" "${name}Effort" $effort; Max = $max
+       Pool = $pool; Reserve = [double](Get-Setting "COLLAB_${U}_RESERVE" "${name}Reserve" $reserve); Stop = [double](Get-Setting "COLLAB_${U}_STOP" "${name}Stop" $stop) }
+}
+$GeminiAgents = [ordered]@{
+    neon     = New-GeminiAgent 'neon'     'gemini-4-neon'     'medium' 'xhigh' 'gemini' 0.10 0
+    hydrogen = New-GeminiAgent 'hydrogen' 'gemini-4-hydrogen' 'xhigh'  'xhigh' 'gemini' 0.10 0
+    argon    = New-GeminiAgent 'argon'    'gemini-4-argon'    'high'   'high'  'argon'  0.15 0.05
+}
 $Effort       = Get-Setting 'COLLAB_EFFORT' 'effort' 'high'
-$ArgonReserve = [double](Get-Setting 'COLLAB_ARGON_RESERVE' 'argonReserve' 0.15)  # below: major decisions only
-$ArgonStop    = [double](Get-Setting 'COLLAB_ARGON_STOP' 'argonStop' 0.05)        # below: Argon off (use hydrogen)
-$GeminiReserve = [double](Get-Setting 'COLLAB_GEMINI_RESERVE' 'geminiReserve' 0.10) # shared Gemini pool: below, major only
-# highest effort tier each agy model offers (agy models): Argon low..high, Hydrogen low..xhigh
 function Limit-Effort($e, $max) { $order = 'low', 'medium', 'high', 'xhigh'; $i = [array]::IndexOf($order, ($e -replace 'max', 'xhigh')); if ($i -lt 0) { $i = 2 }; $order[[math]::Min($i, [array]::IndexOf($order, $max))] }
 $CodexNetwork = "$(Get-Setting 'COLLAB_CODEX_NETWORK' 'codexNetwork' 'true')" -eq 'true'
 # Codex hooks off for advisor calls by default: a hook that rewrites commands (for example rtk's) makes them run a
@@ -135,7 +146,13 @@ function Compare-Snapshot($a, $b) {
     $msgs
 }
 
-function Read-Registry { if (Test-Path $regPath) { try { return Get-Content $regPath -Raw | ConvertFrom-Json -AsHashtable } catch {} }; return @{} }
+function Read-Registry {
+    $reg = @{}
+    if (Test-Path $regPath) { try { $reg = Get-Content $regPath -Raw | ConvertFrom-Json -AsHashtable } catch {} }
+    # sessions of the Argon agent were stored as 'agy' before Neon existed: same model, so keep them under the new name
+    foreach ($k in @($reg.Keys | Where-Object { $_ -eq 'agy' -or $_ -like 'agy@*' })) { $nk = $k -replace '^agy', 'argon'; if (-not $reg.ContainsKey($nk)) { $reg[$nk] = $reg[$k] }; $reg.Remove($k) }
+    return $reg
+}
 function Save-Registry($reg) { $reg | ConvertTo-Json -Depth 5 | Set-Content -Path $regPath -Encoding utf8 }
 
 # --- process runner with hard timeout (kills the whole tree) -----------------
@@ -187,7 +204,7 @@ function Format-Pct($f) { if ($null -eq $f) { '?' } else { "$([math]::Round(100 
 $reg = Read-Registry
 if ($Status) {
     "project: $root"
-    $base = 'codex', 'codex-run', 'hydrogen', 'agy'
+    $base = @('codex', 'codex-run') + @($GeminiAgents.Keys)
     $threads = @($reg.Keys | Where-Object { $_ -like '*@*' -and ($_ -split '@')[0] -in $base } | Sort-Object)
     foreach ($k in @($base) + $threads) {
         $e = $reg[$k]
@@ -197,41 +214,38 @@ if ($Status) {
         if ($e) { "  $k$busy  session $($e.id)  model=$($e.model)  turns=$($e.turns)  last=$($e.last)$(if ($e.lastAsk) { "`n      last ask: $($e.lastAsk)" })" } else { "  ${k}: no session$busy" }
     }
     $aq = Get-AgyQuota
-    if ($aq) { "agy quota: Argon weekly left $(Format-Pct $aq.argon.left) (reset $($aq.argon.reset)); shared Gemini pool (Hydrogen, Flash) weekly left $(Format-Pct $aq.gemini.left), 5h left $(Format-Pct $aq.gemini5h.left) (reset $($aq.gemini5h.reset))" } else { 'agy quota: unavailable' }
+    if ($aq) { "agy quota: shared Gemini pool (Neon, Hydrogen, Flash) weekly left $(Format-Pct $aq.gemini.left), 5h left $(Format-Pct $aq.gemini5h.left) (reset $($aq.gemini5h.reset)); Argon weekly left $(Format-Pct $aq.argon.left) (reset $($aq.argon.reset))" } else { 'agy quota: unavailable' }
     $cq = Get-CodexRollout $reg['codex'].id
     if ($cq) { "codex quota: 5h used $($cq.h5)%, weekly used $($cq.week)% (reset $($cq.weekReset)); context used $($cq.ctx)%  [as of the last codex call]" } else { 'codex quota: unknown (no recent session)' }
     return
 }
-if (-not $Agent) { throw 'Specify -Agent codex|codex-run|hydrogen|agy (or -Status)' }
-if ($Agent -eq 'argon') { $Agent = 'agy' }   # alias; the session key stays 'agy'
-$isGemini = $Agent -in 'agy', 'hydrogen'
+if (-not $Agent) { throw "Specify -Agent codex|codex-run|$($GeminiAgents.Keys -join '|') (or -Status)" }
+if ($Agent -eq 'agy') { $Agent = 'argon' }   # old name of the Argon agent
+$isGemini = $GeminiAgents.Contains($Agent)
+if ($Agent -notin 'codex', 'codex-run' -and -not $isGemini) { throw "Unknown agent '$Agent'. Valid: codex, codex-run, $($GeminiAgents.Keys -join ', '), agy (= argon)" }
 
 # --- choose model / session key ------------------------------------------------
 $key = if ($Thread) { "$Agent@$Thread" } else { $Agent }   # one conversation (and lock) per key
 $guardLog = Join-Path $collab "guard-$key.log"               # agy guard decisions for this conversation
 $note = $null
 $admin = $Reset -or $Compact   # bookkeeping calls are never blocked by quota
-if ($Agent -eq 'agy') {
+if ($isGemini) {
     $aq = Get-AgyQuota
-    if ($aq -and $aq.argon -and -not $admin) {
-        if ($aq.argon.left -le $ArgonStop) {
-            Write-Host "[collab] agy | Argon weekly quota exhausted ($(Format-Pct $aq.argon.left) left, resets $($aq.argon.reset)). Argon is off until then: use -Agent hydrogen (or codex)."
+    $ga = $GeminiAgents[$Agent]
+    $pq = if ($ga.Pool -eq 'argon') { $aq.argon } else { $aq.gemini }
+    $pn = if ($ga.Pool -eq 'argon') { 'Argon weekly quota' } else { 'shared Gemini weekly quota' }
+    $alt = if ($Agent -eq 'argon') { 'neon or hydrogen' } elseif ($Agent -eq 'neon') { 'hydrogen or codex' } else { 'codex' }
+    if ($aq -and $pq -and -not $admin) {
+        if ($ga.Stop -gt 0 -and $pq.left -le $ga.Stop) {
+            Write-Host "[collab] $Agent | $pn exhausted ($(Format-Pct $pq.left) left, resets $($pq.reset)). $Agent is off until then: use $alt."
             exit 3
         }
-        if ($aq.argon.left -le $ArgonReserve -and -not $Major) {
-            Write-Host "[collab] agy | Argon weekly quota low ($(Format-Pct $aq.argon.left) left, resets $($aq.argon.reset)). Reserved for major decisions: re-run with -Major, or use -Agent hydrogen."
+        if ($pq.left -le $ga.Reserve -and -not $Major) {
+            Write-Host "[collab] $Agent | $pn low ($(Format-Pct $pq.left) left, resets $($pq.reset)). Reserved for major decisions: re-run with -Major, or use $alt."
             exit 3
         }
     }
-    if (-not $Model) { $Model = "$AgyModel-$(Limit-Effort $Effort 'high')" }
-    $Effort = $Model -replace '^.*-', ''
-} elseif ($Agent -eq 'hydrogen') {
-    $aq = Get-AgyQuota
-    if ($aq -and $aq.gemini -and -not $admin -and $aq.gemini.left -le $GeminiReserve -and -not $Major) {
-        Write-Host "[collab] hydrogen | shared Gemini weekly quota low ($(Format-Pct $aq.gemini.left) left, resets $($aq.gemini.reset)). Reserved for major decisions: re-run with -Major, or use codex."
-        exit 3
-    }
-    if (-not $Model) { $Model = "$HydrogenModel-$(Limit-Effort $HydrogenEffort 'xhigh')" }
+    if (-not $Model) { $Model = "$($ga.Model)-$(Limit-Effort $ga.Effort $ga.Max)" }
     $Effort = $Model -replace '^.*-', ''
 } elseif ($Agent -eq 'codex-run') {
     # separate conversation from 'codex': never switch model or effort inside one conversation
@@ -396,7 +410,7 @@ if ($res.Id) {
 $secs = [int]$sw.Elapsed.TotalSeconds
 $quota = ''
 if ($Agent -like 'codex*') { $cq = Get-CodexRollout $res.Id; if ($cq) { $quota = "codex 5h used $($cq.h5)%, week used $($cq.week)% | context $($cq.ctx)%" } }
-elseif ($Agent -eq 'agy' -and $aq -and $aq.argon) { $quota = "Argon week left $(Format-Pct $aq.argon.left) (before this call)" }
+elseif ($Agent -eq 'argon' -and $aq -and $aq.argon) { $quota = "Argon week left $(Format-Pct $aq.argon.left) (before this call)" }
 elseif ($aq -and $aq.gemini) { $quota = "Gemini pool week left $(Format-Pct $aq.gemini.left), 5h left $(Format-Pct $aq.gemini5h.left) (before this call)" }
 $state = if ($isNew) { 'NEW conversation (include a project briefing)' } else { "resumed, turn $($reg[$key].turns)" }
 $header = "[collab] $key | model=$Model ($Effort) | $state | ${secs}s | session=$($res.Id) | $quota"

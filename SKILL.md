@@ -1,22 +1,22 @@
 ---
 name: advisors
-description: Work with frontier agents from OpenAI Codex CLI (gpt-6.2-sol, gpt-6.2-astra) and Google Antigravity CLI (agy: Gemini 4 Hydrogen and Gemini 4 Argon) as independent collaborators that read and search the whole repo, run code, use the web and give their own analysis, so you and the user do not get stuck in a local optimum. Use at the start of significant tasks (independent approaches before you commit), to delegate investigations or experiments, to red-team a plan or result, when results surprise you, when stuck, before declaring a non-trivial result correct, or when the user says "ask codex", "ask agy/gemini/hydrogen/argon", "second opinion". Keeps one persistent conversation per agent per project.
+description: Work with frontier agents from OpenAI Codex CLI (gpt-6.2-sol, gpt-6.2-astra) and Google Antigravity CLI (agy: Gemini 4 Hydrogen, Gemini 4 Neon and Gemini 4 Argon) as independent collaborators that read and search the whole repo, run code, use the web and give their own analysis, so you and the user do not get stuck in a local optimum. Use at the start of significant tasks (independent approaches before you commit), to delegate investigations or experiments, to red-team a plan or result, when results surprise you, when stuck, before declaring a non-trivial result correct, or when the user says "ask codex", "ask agy/gemini/hydrogen/argon", "second opinion". Keeps one persistent conversation per agent per project.
 ---
 
 # Frontier collaborators: Codex and agy
 
 You are the main agent. You own the code, decide, and integrate. The advisors are frontier models with their own agent loops: they read and search the repository, run code and use the web themselves, so you do not have to relay context, and the user does not have to be the messenger. Their value is **independent perspective**: they catch what you and the user both missed and break you out of local optima. Use them as strong colleagues, not as a chat box.
 
-| | `codex-run` (`gpt-6.2-sol`, high) | `hydrogen` (`gemini-4-hydrogen`, xhigh) | `codex` (`gpt-6.2-astra`, high) | `agy` (`gemini-4-argon`, high) |
-|---|---|---|---|---|
-| Tier | **Everyday** | **Everyday** | **Frontier** | **Frontier** |
-| Role | Research engineer: carries out tasks end to end and gives analysis | Research scientist and engineer: opinions, checks | Senior engineer and reviewer: opinions | Senior research scientist: opinions |
-| Can | Read and search the repo, run commands (python, tests), network, web search | Read and search the repo, run Python and commands, web search, fetch pages, subagents | Same as `codex-run` | Same as `hydrogen` |
-| Writes | Only `<root>/.claude/collab/work/` (sandbox); patches to `work/patches/*.patch` | Only `work/` (by instruction, with guards and a git check as backstop) | Same as `codex-run` | Same as `hydrogen` |
-| Best for | Experiments, reproductions, checks and sweeps, data analysis, code review, drafting patches | Method critique, theory, experiment design, hidden assumptions, reviews of plans and documents, literature | Hard reviews, design alternatives, red-teaming, judging results | Your hardest and most consequential questions: deep theory, final red-team before committing |
-| Quota | Codex pool, much cheaper | **Shared Gemini pool: large** | Codex pool (shared with codex-run) | **Argon weekly: small** |
+| | `codex-run` (`gpt-6.2-sol`, high) | `hydrogen` (`gemini-4-hydrogen`, xhigh) | `codex` (`gpt-6.2-astra`, high) | `neon` (`gemini-4-neon`, medium) | `argon` (`gemini-4-argon`, high) |
+|---|---|---|---|---|---|
+| Tier | **Everyday** | **Everyday** | **Frontier** | **Frontier** | **Frontier, most capable** |
+| Role | Research engineer: carries out tasks end to end and gives analysis | Research scientist and engineer: opinions, checks | Senior engineer and reviewer: opinions | Senior research scientist: opinions | Senior research scientist: opinions on the hardest questions |
+| Can | Read and search the repo, run commands (python, tests), network, web search | Read and search the repo, run Python and commands, web search, fetch pages, subagents | Same as `codex-run` | Same as `hydrogen` | Same as `hydrogen` |
+| Writes | Only `<root>/.claude/collab/work/` (sandbox); patches to `work/patches/*.patch` | Only `work/` (by instruction, with guards and a git check as backstop) | Same as `codex-run` | Same as `hydrogen` | Same as `hydrogen` |
+| Best for | Experiments, reproductions, checks and sweeps, data analysis, code review, drafting patches | Method critique, theory, experiment design, hidden assumptions, reviews of plans and documents, literature | Hard reviews, design alternatives, red-teaming, judging results | The newer, cheaper frontier-class Google model: deep theory, red-team of a plan or result. Default effort is medium (raise it for harder questions); it draws on the shared pool with `hydrogen`, so it is the Google frontier option to reach for first | The hardest, most consequential questions: older than Neon but larger, and the most frontier Google model available to us. For deep theory and a final red-team before committing. Use sparingly: its quota is small |
+| Quota | Codex pool, much cheaper | **Shared Gemini pool: large** | Codex pool (shared with codex-run) | **Shared Gemini pool** (same as `hydrogen`) | **Argon weekly: small, separate** |
 
-The tiers mirror your own models: the everyday pair (Sol, Hydrogen) is like Opus/Sonnet, the frontier pair (Astra, Argon) like Fable. Default to the everyday pair; spend the frontier pair where the extra depth matters. For a complex or consequential question, run all four at once. `-Agent argon` is an alias for `agy`.
+The tiers mirror your own models: the everyday pair (Sol, Hydrogen) is like Opus/Sonnet, the frontier tier (Astra, Neon, Argon) like Fable. **You choose which advisors to call:** default to the everyday pair, spend the frontier tier where the extra depth matters, and for a complex or consequential question run several at once. **If the user names an advisor, call exactly that one** (`-Agent agy` is the old name of `argon`).
 
 Each agent name is a **separate conversation** with a fixed model and effort: a conversation never switches model or effort. So each CLI has two conversations per project, one per model. None of them writes code well enough to replace you: review their patches.
 
@@ -43,12 +43,13 @@ Script: `~/.claude/skills/advisors/scripts/advise.ps1` (PowerShell 7). Run it fr
 pwsh -NoProfile -File "$HOME/.claude/skills/advisors/scripts/advise.ps1" -Agent codex-run -PromptFile <file>   # everyday: task, check, review
 pwsh -NoProfile -File "$HOME/.claude/skills/advisors/scripts/advise.ps1" -Agent hydrogen  -PromptFile <file>   # everyday: opinion, check
 pwsh -NoProfile -File "$HOME/.claude/skills/advisors/scripts/advise.ps1" -Agent codex     -PromptFile <file>   # frontier opinion / review
-pwsh -NoProfile -File "$HOME/.claude/skills/advisors/scripts/advise.ps1" -Agent agy       -PromptFile <file>   # frontier opinion; -Major only for a major decision
+pwsh -NoProfile -File "$HOME/.claude/skills/advisors/scripts/advise.ps1" -Agent neon      -PromptFile <file>   # frontier opinion (shared Gemini pool); -Major only for a major decision
+pwsh -NoProfile -File "$HOME/.claude/skills/advisors/scripts/advise.ps1" -Agent argon     -PromptFile <file>   # the hardest questions; small separate quota
 pwsh -NoProfile -File "$HOME/.claude/skills/advisors/scripts/advise.ps1" -Agent hydrogen -Thread <name> -PromptFile <file>   # separate conversation, see below
 pwsh -NoProfile -File "$HOME/.claude/skills/advisors/scripts/advise.ps1" -Status    # sessions, threads, BUSY, last ask, quotas
 ```
 
-- **Run calls in the background** (`run_in_background: true`); a call takes minutes and sometimes much longer (Astra and Argon at high: often 10 to 30+ min). Keep working; you will be notified. All four agents can run in parallel: each has its own conversation and lock.
+- **Run calls in the background** (`run_in_background: true`); a call takes minutes and sometimes much longer (Astra and Neon at high: often 10 to 30+ min). Keep working; you will be notified. All four agents can run in parallel: each has its own conversation and lock.
 - The hard timeout is 45 min by default (`-TimeoutMinutes`); the whole process tree is killed when it is reached.
 - **Do not pass `-Model` or change effort.** Each conversation has a fixed model and effort, because switching invalidates the provider's conversation cache. To get a different model, use another agent name.
 - The first line is a header: agent, model, NEW/resumed, duration, session, quota and context use. Then the backstop lines (see Rules): `repo check: ...` and, for agy, `guard blocked ...`. Every answer is also saved to `<root>/.claude/collab/reports/<time>-<agent>.md` (the path is printed), so results survive your own context compaction.
@@ -101,21 +102,21 @@ The script injects a top-level preamble into every call: their role, what they c
 
 ## Quotas (account-wide: shared by every project and agent)
 
-The script reads agy quota before each `hydrogen`/`agy` call (`agy -p /usage`, free).
+The script reads agy quota before each `hydrogen`/`neon`/`argon` call (`agy -p /usage`, free).
 
-- **Shared Gemini pool** (`hydrogen`): large, weekly plus 5-hour windows, shown in the header. At **10% or less weekly left**, `hydrogen` is reserved for major decisions: the script exits 3 unless you pass `-Major`. Use codex instead.
-- **Argon** (`agy`) has its own small weekly quota:
-  - above 15% left: normal use for frontier questions; everyday opinions go to `hydrogen`.
-  - **15% or less: major decisions only.** The script exits 3 unless you pass `-Major`. Use `hydrogen` instead.
-  - **5% or less: Argon is off until its reset.** The script exits 3 even with `-Major`. Use `hydrogen`. Hydrogen is not a silent stand-in: it has its own conversation, so brief it properly.
-- `-Major` means a genuinely major decision (a protocol, a paper's core method, a change of direction). Do not pass it routinely: it bypasses the reserve that keeps Argon available when it matters.
+- **Shared Gemini pool** (`neon`, `hydrogen`, Flash): weekly plus 5-hour windows, shown in the header. At **10% or less weekly left**, both are reserved for major decisions: the script exits 3 unless you pass `-Major`. Use codex instead.
+- **Argon** has its own small weekly quota:
+  - above 15% left: normal use for the hardest questions; frontier or everyday opinions that do not need it go to `neon`, `hydrogen` or `codex`.
+  - **15% or less: major decisions only.** The script exits 3 unless you pass `-Major`.
+  - **5% or less: Argon is off until its reset.** The script exits 3 even with `-Major`. Use `neon` (not a silent stand-in: it has its own conversation, so brief it properly).
+- `-Major` means a genuinely major decision (a protocol, a paper's core method, a change of direction). Do not pass it routinely: it bypasses the reserve that keeps the quotas available when it matters.
 - **Codex** (`codex` and `codex-run` share one quota): the header shows 5-hour and weekly usage. `codex-run` costs far less. At 90% or more of either window, delegate only what matters.
 - Quota errors are not retried. Capacity and overload errors are retried twice, 30 s apart.
 
 ## Context
 
 - Codex compacts its own context automatically. The header shows context use.
-- `hydrogen` / `agy`: at a task boundary, after many turns or when answers degrade, run `-Agent hydrogen -Compact` (or `-Agent agy -Compact`). The user can also run `/compact` interactively with `agy --conversation <id>`.
+- `hydrogen` / `neon` / `argon`: at a task boundary, after many turns or when answers degrade, run `-Agent hydrogen -Compact` (or `-Agent neon -Compact`). The user can also run `/compact` interactively with `agy --conversation <id>`.
 - When the topic changes completely, `-Reset` and start fresh from the briefing.
 
 ## Rules
@@ -138,7 +139,7 @@ The script reads agy quota before each `hydrogen`/`agy` call (`agy -p /usage`, f
 - The sandbox blocked writes, deletes and `git commit` outside `work/` for a repository in the user profile. It did **not** block them for a repository under `%TEMP%`, because the temp directory is writable in `workspace-write`: do not test the boundary there.
 - Inside the sandbox, HTTPS downloads from the shell (curl, `Invoke-WebRequest`) failed with Schannel errors; the built-in web search worked.
 - A user hook that rewrites commands (rtk's `PreToolUse` hook) broke every rewritten command in the sandbox (`rtk: Cannot determine Claude config directory`); setting `HOME` did not help. The script passes `--disable hooks` unless `codexHooks` is true; with it, git and `rg` work and `git commit` is still refused by the sandbox.
-- agy models: `gemini-4-argon-{low,medium,high}`, `gemini-4-hydrogen-{low,medium,high,xhigh}` (`agy models`). Effort is the model-name suffix. `/usage` groups: `gemini-weekly`/`gemini-5h` (shared pool) and `gemini-argon-wtu-weekly` (Argon). A Hydrogen call moves only the shared pool.
+- agy models (1.5.11): `gemini-4-neon-{low,medium,high,xhigh}`, `gemini-4-hydrogen-{low,medium,high,xhigh}`, `gemini-4-argon-{low,medium,high}` (`agy models`). Neon is in the shared pool: in a smoke test through the script it answered and used the file tools normally. Effort is the model-name suffix. `/usage` groups: `gemini-weekly`/`gemini-5h` (shared pool) and `gemini-argon-wtu-weekly` (Argon only). Hydrogen and Neon calls move only the shared pool; Argon calls move only the Argon quota.
 - agy headless runs start in the saved agent mode (Auto by default). `--mode auto` on the command line is refused in print mode ("rollout flag off") although the session itself runs in Auto. The script passes `agentMode: ""` (default mode) in `--settings`.
 - Auto mode runs commands in the Windows terminal sandbox. In testing that sandbox could not read files under the user profile, write its own workspace, start Python from `%LOCALAPPDATA%`, or pass TLS through its proxy; its reviewer also approved commands leaving the sandbox. It is not usable as a boundary here.
 - Plan mode (`--mode plan`) did **not** block `write_file` in agy 1.5.9 (a probe file was created).

@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-11-18: Gemini 4 Neon, agy agents as a table
+
+Tested with codex-cli 0.169.1 and agy 1.5.11.
+
+### Added
+- **`neon` collaborator**: Gemini 4 Neon, default effort `medium` (up to `xhigh`), its own conversation and lock. It draws on the **shared Gemini pool** with Hydrogen and Flash.
+- The agy agents are now **one table** (`$GeminiAgents` in `advise.ps1`: model, default effort, highest effort, quota pool, reserve and stop thresholds per agent) instead of per-model code, so the next Google model is one added row. Agent names are no longer a fixed list in the parameter block; an unknown name gets a clear error. Every row reads `COLLAB_<NAME>_MODEL`, `_EFFORT`, `_RESERVE`, `_STOP` and `<name>Model`, `<name>Effort`, `<name>Reserve`, `<name>Stop`.
+
+### Changed
+- **`argon` is now its own agent name** (Gemini 4 Argon, `high`, small separate quota, same thresholds as before: 15% needs `-Major`, 5% off). `-Agent agy` still works as the old name of `argon`; existing `agy` sessions and threads are renamed to `argon` automatically, because the model is the same.
+- Quota gates are per agent: `neon` and `hydrogen` need `-Major` at 10% or less of the shared pool; `argon` follows its own quota. The messages name the other agents to use instead.
+- `-Status` lists `neon` and shows both quotas.
+- Config: `agyModel` is replaced by per-agent keys (`argonModel`, `neonModel`, ...); `geminiReserve` is replaced by `neonReserve` / `hydrogenReserve`.
+
 ## 2026-11-17: GPT-6.2
 
 Tested with codex-cli 0.169.1 and agy 1.5.8.
